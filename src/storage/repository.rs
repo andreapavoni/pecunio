@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::domain::{Cents, Transfer, TransferId, Wallet, WalletId, WalletType};
 
-use super::MIGRATION_001_INITIAL;
+use super::{MIGRATION_001_INITIAL, MIGRATION_002_BUDGETS};
 
 /// Statistics for ledger integrity verification.
 #[derive(Debug, Clone)]
@@ -42,7 +42,13 @@ impl Repository {
         sqlx::query(MIGRATION_001_INITIAL)
             .execute(&self.pool)
             .await
-            .context("Failed to run migrations")?;
+            .context("Failed to run migration 001")?;
+
+        sqlx::query(MIGRATION_002_BUDGETS)
+            .execute(&self.pool)
+            .await
+            .context("Failed to run migration 002")?;
+
         Ok(())
     }
 
@@ -282,6 +288,68 @@ impl Repository {
         rows.iter().map(Self::row_to_transfer).collect()
     }
 
+    /// List transfers with optional filters.
+    pub async fn list_transfers_filtered(
+        &self,
+        wallet_id: Option<WalletId>,
+        category: Option<&str>,
+        from_date: Option<DateTime<Utc>>,
+        to_date: Option<DateTime<Utc>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Transfer>> {
+        // Build query dynamically based on filters
+        let mut query = String::from(
+            "SELECT id, sequence, from_wallet_id, to_wallet_id, amount_cents, timestamp, recorded_at, description, category, tags, reverses, external_ref FROM transfers WHERE 1=1"
+        );
+
+        // Collect all string bindings first so they live long enough
+        let wallet_id_str = wallet_id.map(|id| id.to_string());
+        let from_date_str = from_date.map(|dt| dt.to_rfc3339());
+        let to_date_str = to_date.map(|dt| dt.to_rfc3339());
+
+        if wallet_id.is_some() {
+            query.push_str(" AND (from_wallet_id = ? OR to_wallet_id = ?)");
+        }
+        if category.is_some() {
+            query.push_str(" AND category = ?");
+        }
+        if from_date.is_some() {
+            query.push_str(" AND timestamp >= ?");
+        }
+        if to_date.is_some() {
+            query.push_str(" AND timestamp <= ?");
+        }
+
+        query.push_str(" ORDER BY sequence");
+
+        if let Some(lim) = limit {
+            query.push_str(&format!(" LIMIT {}", lim));
+        }
+
+        // Build the query with bindings
+        let mut sql_query = sqlx::query(&query);
+
+        if let Some(ref wid_str) = wallet_id_str {
+            sql_query = sql_query.bind(wid_str).bind(wid_str);
+        }
+        if let Some(cat) = category {
+            sql_query = sql_query.bind(cat);
+        }
+        if let Some(ref fd_str) = from_date_str {
+            sql_query = sql_query.bind(fd_str);
+        }
+        if let Some(ref td_str) = to_date_str {
+            sql_query = sql_query.bind(td_str);
+        }
+
+        let rows = sql_query
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to list filtered transfers")?;
+
+        rows.iter().map(Self::row_to_transfer).collect()
+    }
+
     /// Compute the balance for a wallet using SQL aggregation.
     /// This is more efficient than loading all transfers and computing in memory.
     pub async fn compute_balance(&self, wallet_id: WalletId) -> Result<Cents> {
@@ -495,6 +563,120 @@ impl Repository {
             has_sequence_gaps,
             invalid_wallet_refs: invalid_refs,
             invalid_amounts,
+        })
+    }
+
+    // ========================
+    // Budget operations
+    // ========================
+
+    /// Save a new budget to the database.
+    pub async fn save_budget(&self, budget: &crate::domain::Budget) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO budgets (id, name, category, period_type, amount_cents, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(budget.id.to_string())
+        .bind(&budget.name)
+        .bind(&budget.category)
+        .bind(budget.period_type.as_str())
+        .bind(budget.amount_cents)
+        .bind(budget.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Failed to save budget")?;
+        Ok(())
+    }
+
+    /// Get a budget by name.
+    pub async fn get_budget_by_name(&self, name: &str) -> Result<Option<crate::domain::Budget>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, category, period_type, amount_cents, created_at
+            FROM budgets
+            WHERE name = ?
+            "#,
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to fetch budget by name")?;
+
+        match row {
+            Some(row) => Ok(Some(Self::row_to_budget(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List all budgets.
+    pub async fn list_budgets(&self) -> Result<Vec<crate::domain::Budget>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name, category, period_type, amount_cents, created_at
+            FROM budgets
+            ORDER BY name
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list budgets")?;
+
+        rows.iter().map(Self::row_to_budget).collect()
+    }
+
+    /// Delete a budget.
+    pub async fn delete_budget(&self, name: &str) -> Result<()> {
+        sqlx::query("DELETE FROM budgets WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete budget")?;
+        Ok(())
+    }
+
+    /// Sum transfers by category within a date range.
+    pub async fn sum_transfers_by_category(
+        &self,
+        category: &str,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+    ) -> Result<Cents> {
+        let row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(amount_cents), 0) as total
+            FROM transfers
+            WHERE category = ? AND timestamp >= ? AND timestamp < ?
+            "#,
+        )
+        .bind(category)
+        .bind(from_date.to_rfc3339())
+        .bind(to_date.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to sum transfers by category")?;
+
+        Ok(row.get("total"))
+    }
+
+    fn row_to_budget(row: &sqlx::sqlite::SqliteRow) -> Result<crate::domain::Budget> {
+        use crate::domain::PeriodType;
+
+        let id_str: String = row.get("id");
+        let period_type_str: String = row.get("period_type");
+        let created_at_str: String = row.get("created_at");
+
+        Ok(crate::domain::Budget {
+            id: Uuid::parse_str(&id_str).context("Invalid budget ID")?,
+            name: row.get("name"),
+            category: row.get("category"),
+            period_type: PeriodType::from_str(&period_type_str)
+                .ok_or_else(|| anyhow::anyhow!("Invalid period type: {}", period_type_str))?,
+            amount_cents: row.get("amount_cents"),
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)
+                .context("Invalid created_at timestamp")?
+                .with_timezone(&Utc),
         })
     }
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
@@ -52,6 +53,10 @@ pub enum Commands {
         /// Force transfer even if it would make wallet balance negative
         #[arg(long)]
         force: bool,
+
+        /// Date of the transfer (ISO 8601 format: YYYY-MM-DD, defaults to now)
+        #[arg(long)]
+        date: Option<String>,
     },
 
     /// Show balance for a wallet or all wallets
@@ -66,9 +71,21 @@ pub enum Commands {
         #[arg(long)]
         wallet: Option<String>,
 
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Filter from date (YYYY-MM-DD)
+        #[arg(long)]
+        from_date: Option<String>,
+
+        /// Filter to date (YYYY-MM-DD)
+        #[arg(long)]
+        to_date: Option<String>,
+
         /// Maximum number of transfers to show
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
+        #[arg(short, long)]
+        limit: Option<usize>,
     },
 
     /// Verify ledger integrity
@@ -90,6 +107,10 @@ pub enum Commands {
         /// Transfer ID
         id: String,
     },
+
+    /// Budget management commands
+    #[command(subcommand)]
+    Budget(BudgetCommands),
 }
 
 #[derive(Subcommand)]
@@ -132,6 +153,39 @@ pub enum WalletCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum BudgetCommands {
+    /// Create a new budget
+    Create {
+        /// Budget name (must be unique)
+        name: String,
+
+        /// Category to track
+        #[arg(short, long)]
+        category: String,
+
+        /// Budget amount (e.g., "400" or "400.00")
+        #[arg(short, long)]
+        amount: String,
+
+        /// Period: weekly, monthly, yearly
+        #[arg(short, long)]
+        period: String,
+    },
+
+    /// List all budgets
+    List,
+
+    /// Show budget status (spending vs limit)
+    Status,
+
+    /// Delete a budget
+    Delete {
+        /// Budget name
+        name: String,
+    },
+}
+
 impl Cli {
     pub async fn run(self) -> Result<()> {
         match self.command {
@@ -152,13 +206,30 @@ impl Cli {
                 description,
                 category,
                 force,
+                date,
             } => {
                 let service = LedgerService::connect(&self.database).await?;
                 let amount_cents =
                     parse_cents(&amount).context("Invalid amount format. Use '50.00' or '50'")?;
 
+                // Parse date or use now
+                let timestamp = match date {
+                    Some(date_str) => parse_date(&date_str).with_context(|| {
+                        format!("Invalid date format '{}'. Use YYYY-MM-DD", date_str)
+                    })?,
+                    None => Utc::now(),
+                };
+
                 let result = service
-                    .record_transfer(&from, &to, amount_cents, description, category, force)
+                    .record_transfer(
+                        &from,
+                        &to,
+                        amount_cents,
+                        timestamp,
+                        description,
+                        category,
+                        force,
+                    )
                     .await?;
 
                 println!(
@@ -175,9 +246,16 @@ impl Cli {
                 run_balance_command(&service, wallet).await?;
             }
 
-            Commands::Transfers { wallet, limit } => {
+            Commands::Transfers {
+                wallet,
+                category,
+                from_date,
+                to_date,
+                limit,
+            } => {
                 let service = LedgerService::connect(&self.database).await?;
-                run_transfers_command(&service, wallet, limit).await?;
+                run_transfers_command(&service, wallet, category, from_date, to_date, limit)
+                    .await?;
             }
 
             Commands::Check => {
@@ -226,6 +304,11 @@ impl Cli {
                     Uuid::parse_str(&id).context("Invalid transfer ID format (expected UUID)")?;
 
                 run_show_transfer_command(&service, transfer_id).await?;
+            }
+
+            Commands::Budget(budget_cmd) => {
+                let service = LedgerService::connect(&self.database).await?;
+                run_budget_command(&service, budget_cmd).await?;
             }
         }
 
@@ -352,9 +435,32 @@ async fn run_balance_command(service: &LedgerService, wallet: Option<String>) ->
 async fn run_transfers_command(
     service: &LedgerService,
     wallet: Option<String>,
-    limit: usize,
+    category: Option<String>,
+    from_date: Option<String>,
+    to_date: Option<String>,
+    limit: Option<usize>,
 ) -> Result<()> {
-    let transfers = service.list_transfers(wallet.as_deref()).await?;
+    use crate::application::TransferFilter;
+
+    // Parse dates
+    let from_date_parsed = from_date
+        .map(|s| parse_date(&s))
+        .transpose()
+        .context("Invalid from-date")?;
+    let to_date_parsed = to_date
+        .map(|s| parse_date(&s))
+        .transpose()
+        .context("Invalid to-date")?;
+
+    let filter = TransferFilter {
+        wallet,
+        category,
+        from_date: from_date_parsed,
+        to_date: to_date_parsed,
+        limit,
+    };
+
+    let transfers = service.list_transfers_filtered(filter).await?;
 
     if transfers.is_empty() {
         println!("No transfers found.");
@@ -367,7 +473,8 @@ async fn run_transfers_command(
         );
         println!("{}", "-".repeat(70));
 
-        for transfer in transfers.iter().rev().take(limit) {
+        // Show all transfers (limit already applied in query)
+        for transfer in transfers.iter().rev() {
             let from_name = wallet_names
                 .get(&transfer.from_wallet)
                 .map(|s| s.as_str())
@@ -510,4 +617,108 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len - 3])
     }
+}
+
+fn parse_date(date_str: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::NaiveDate;
+
+    // Parse YYYY-MM-DD format
+    let naive_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .context("Date must be in YYYY-MM-DD format")?;
+
+    // Convert to UTC datetime at midnight
+    let naive_datetime = naive_date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("Invalid date"))?;
+
+    Ok(chrono::DateTime::from_naive_utc_and_offset(
+        naive_datetime,
+        chrono::Utc,
+    ))
+}
+
+async fn run_budget_command(service: &LedgerService, cmd: BudgetCommands) -> Result<()> {
+    use crate::domain::PeriodType;
+
+    match cmd {
+        BudgetCommands::Create {
+            name,
+            category,
+            amount,
+            period,
+        } => {
+            let amount_cents =
+                parse_cents(&amount).context("Invalid amount format. Use '400.00' or '400'")?;
+
+            let period_type = PeriodType::from_str(&period).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid period type '{}'. Valid types: weekly, monthly, yearly",
+                    period
+                )
+            })?;
+
+            let budget = service
+                .create_budget(name.clone(), category, amount_cents, period_type)
+                .await?;
+            println!(
+                "Created budget: {} ({}, {} per {})",
+                budget.name,
+                budget.category,
+                format_cents(budget.amount_cents),
+                budget.period_type
+            );
+        }
+
+        BudgetCommands::List => {
+            let budgets = service.list_budgets().await?;
+            if budgets.is_empty() {
+                println!("No budgets found.");
+            } else {
+                println!(
+                    "{:<20} {:<15} {:>12} {:<10}",
+                    "NAME", "CATEGORY", "AMOUNT", "PERIOD"
+                );
+                println!("{}", "-".repeat(60));
+                for budget in budgets {
+                    println!(
+                        "{:<20} {:<15} {:>12} {:<10}",
+                        budget.name,
+                        budget.category,
+                        format_cents(budget.amount_cents),
+                        budget.period_type
+                    );
+                }
+            }
+        }
+
+        BudgetCommands::Status => {
+            let statuses = service.get_all_budget_statuses().await?;
+            if statuses.is_empty() {
+                println!("No budgets found.");
+            } else {
+                println!(
+                    "{:<20} {:<10} {:>12} {:>12} {:>12}",
+                    "BUDGET", "PERIOD", "LIMIT", "SPENT", "REMAINING"
+                );
+                println!("{}", "-".repeat(70));
+                for status in statuses {
+                    println!(
+                        "{:<20} {:<10} {:>12} {:>12} {:>12}",
+                        status.budget.name,
+                        status.budget.period_type,
+                        format_cents(status.budget.amount_cents),
+                        format_cents(status.spent),
+                        format_cents(status.remaining),
+                    );
+                }
+            }
+        }
+
+        BudgetCommands::Delete { name } => {
+            service.delete_budget(&name).await?;
+            println!("Deleted budget: {}", name);
+        }
+    }
+
+    Ok(())
 }

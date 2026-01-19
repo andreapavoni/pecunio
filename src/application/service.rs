@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::domain::{
-    build_integrity_report, Cents, IntegrityReport, Transfer, TransferId, Wallet, WalletId,
-    WalletType,
+    build_integrity_report, Budget, Cents, IntegrityReport, PeriodType, Transfer, TransferId,
+    Wallet, WalletId, WalletType,
 };
 use crate::storage::Repository;
 
@@ -53,6 +53,24 @@ pub struct TransferInfo {
 pub struct BalanceEntry {
     pub wallet: Wallet,
     pub balance: Cents,
+}
+
+/// Filter for querying transfers
+pub struct TransferFilter {
+    pub wallet: Option<String>,
+    pub category: Option<String>,
+    pub from_date: Option<DateTime<Utc>>,
+    pub to_date: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+
+/// Budget status information
+pub struct BudgetStatus {
+    pub budget: Budget,
+    pub spent: Cents,
+    pub remaining: Cents,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
 }
 
 impl LedgerService {
@@ -170,6 +188,7 @@ impl LedgerService {
         from_wallet_name: &str,
         to_wallet_name: &str,
         amount_cents: Cents,
+        timestamp: DateTime<Utc>,
         description: Option<String>,
         category: Option<String>,
         force: bool,
@@ -214,7 +233,7 @@ impl LedgerService {
         }
 
         // Create and save transfer
-        let mut transfer = Transfer::new(from_wallet.id, to_wallet.id, amount_cents, Utc::now());
+        let mut transfer = Transfer::new(from_wallet.id, to_wallet.id, amount_cents, timestamp);
 
         if let Some(desc) = description {
             transfer = transfer.with_description(desc);
@@ -276,6 +295,30 @@ impl LedgerService {
             }
             None => Ok(self.repo.list_transfers().await?),
         }
+    }
+
+    /// List transfers with filters.
+    pub async fn list_transfers_filtered(
+        &self,
+        filter: TransferFilter,
+    ) -> Result<Vec<Transfer>, AppError> {
+        // Resolve wallet name to ID if provided
+        let wallet_id = if let Some(name) = &filter.wallet {
+            Some(self.get_wallet(name).await?.id)
+        } else {
+            None
+        };
+
+        Ok(self
+            .repo
+            .list_transfers_filtered(
+                wallet_id,
+                filter.category.as_deref(),
+                filter.from_date,
+                filter.to_date,
+                filter.limit,
+            )
+            .await?)
     }
 
     /// Reverse a transfer (full or partial).
@@ -371,5 +414,93 @@ impl LedgerService {
     pub async fn get_wallet_names(&self) -> Result<HashMap<WalletId, String>, AppError> {
         let wallets = self.repo.list_wallets(true).await?;
         Ok(wallets.into_iter().map(|w| (w.id, w.name)).collect())
+    }
+
+    // ========================
+    // Budget operations
+    // ========================
+
+    /// Create a new budget.
+    pub async fn create_budget(
+        &self,
+        name: String,
+        category: String,
+        amount_cents: Cents,
+        period_type: PeriodType,
+    ) -> Result<Budget, AppError> {
+        // Check if budget already exists
+        if self.repo.get_budget_by_name(&name).await?.is_some() {
+            return Err(AppError::WalletAlreadyExists(name)); // Reuse error type
+        }
+
+        let budget = Budget::new(name, category, period_type, amount_cents);
+        self.repo.save_budget(&budget).await?;
+        Ok(budget)
+    }
+
+    /// Get a budget by name.
+    pub async fn get_budget(&self, name: &str) -> Result<Budget, AppError> {
+        self.repo
+            .get_budget_by_name(name)
+            .await?
+            .ok_or_else(|| AppError::WalletNotFound(name.to_string())) // Reuse error type
+    }
+
+    /// List all budgets.
+    pub async fn list_budgets(&self) -> Result<Vec<Budget>, AppError> {
+        Ok(self.repo.list_budgets().await?)
+    }
+
+    /// Delete a budget.
+    pub async fn delete_budget(&self, name: &str) -> Result<Budget, AppError> {
+        let budget = self.get_budget(name).await?;
+        self.repo.delete_budget(name).await?;
+        Ok(budget)
+    }
+
+    /// Get budget status (spending vs limit for current period).
+    pub async fn get_budget_status(&self, name: &str) -> Result<BudgetStatus, AppError> {
+        let budget = self.get_budget(name).await?;
+        let (period_start, period_end) = budget.current_period(Utc::now());
+
+        let spent = self
+            .repo
+            .sum_transfers_by_category(&budget.category, period_start, period_end)
+            .await?;
+
+        let remaining = budget.amount_cents - spent;
+
+        Ok(BudgetStatus {
+            budget,
+            spent,
+            remaining,
+            period_start,
+            period_end,
+        })
+    }
+
+    /// Get status for all budgets.
+    pub async fn get_all_budget_statuses(&self) -> Result<Vec<BudgetStatus>, AppError> {
+        let budgets = self.list_budgets().await?;
+        let mut statuses = Vec::new();
+
+        for budget in budgets {
+            let (period_start, period_end) = budget.current_period(Utc::now());
+            let spent = self
+                .repo
+                .sum_transfers_by_category(&budget.category, period_start, period_end)
+                .await?;
+            let remaining = budget.amount_cents - spent;
+
+            statuses.push(BudgetStatus {
+                budget,
+                spent,
+                remaining,
+                period_start,
+                period_end,
+            });
+        }
+
+        Ok(statuses)
     }
 }
