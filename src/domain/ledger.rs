@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{Cents, Transfer, WalletId};
+use super::{Cents, Transfer, Wallet, WalletId, WalletType};
 
 /// Compute the balance for a single wallet from a list of transfers.
 /// Balance = sum of incoming transfers - sum of outgoing transfers
@@ -84,6 +84,94 @@ impl std::fmt::Display for ReversalError {
 }
 
 impl std::error::Error for ReversalError {}
+
+/// Result of an integrity check on the ledger.
+#[derive(Debug, Clone)]
+pub struct IntegrityReport {
+    pub wallet_count: i64,
+    pub transfer_count: i64,
+    pub balance_by_type: HashMap<WalletType, Cents>,
+    pub total_balance: Cents,
+    pub is_balanced: bool,
+    pub issues: Vec<IntegrityIssue>,
+}
+
+impl IntegrityReport {
+    pub fn is_healthy(&self) -> bool {
+        self.is_balanced && self.issues.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrityIssue {
+    SequenceGaps,
+    InvalidWalletReferences(i64),
+    InvalidAmounts(i64),
+    UnbalancedLedger(Cents),
+}
+
+impl std::fmt::Display for IntegrityIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntegrityIssue::SequenceGaps => write!(f, "Sequence numbers have gaps"),
+            IntegrityIssue::InvalidWalletReferences(count) => {
+                write!(f, "{} transfers reference non-existent wallets", count)
+            }
+            IntegrityIssue::InvalidAmounts(count) => {
+                write!(f, "{} transfers have invalid amounts (<= 0)", count)
+            }
+            IntegrityIssue::UnbalancedLedger(diff) => {
+                write!(f, "Ledger is unbalanced by {} cents", diff)
+            }
+        }
+    }
+}
+
+/// Build an integrity report from wallets and balances.
+pub fn build_integrity_report(
+    wallets: &[Wallet],
+    balances: &HashMap<WalletId, Cents>,
+    wallet_count: i64,
+    transfer_count: i64,
+    has_sequence_gaps: bool,
+    invalid_wallet_refs: i64,
+    invalid_amounts: i64,
+) -> IntegrityReport {
+    // Group balances by wallet type
+    let mut balance_by_type: HashMap<WalletType, Cents> = HashMap::new();
+    for wallet in wallets {
+        let balance = balances.get(&wallet.id).copied().unwrap_or(0);
+        *balance_by_type.entry(wallet.wallet_type).or_insert(0) += balance;
+    }
+
+    // Calculate total balance (should be 0 for a healthy ledger)
+    let total_balance: Cents = balances.values().sum();
+    let is_balanced = total_balance == 0;
+
+    // Collect issues
+    let mut issues = Vec::new();
+    if has_sequence_gaps {
+        issues.push(IntegrityIssue::SequenceGaps);
+    }
+    if invalid_wallet_refs > 0 {
+        issues.push(IntegrityIssue::InvalidWalletReferences(invalid_wallet_refs));
+    }
+    if invalid_amounts > 0 {
+        issues.push(IntegrityIssue::InvalidAmounts(invalid_amounts));
+    }
+    if !is_balanced {
+        issues.push(IntegrityIssue::UnbalancedLedger(total_balance));
+    }
+
+    IntegrityReport {
+        wallet_count,
+        transfer_count,
+        balance_by_type,
+        total_balance,
+        is_balanced,
+        issues,
+    }
+}
 
 #[cfg(test)]
 mod tests {

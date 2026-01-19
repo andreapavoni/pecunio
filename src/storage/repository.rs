@@ -7,6 +7,16 @@ use crate::domain::{Cents, Transfer, TransferId, Wallet, WalletId, WalletType};
 
 use super::MIGRATION_001_INITIAL;
 
+/// Statistics for ledger integrity verification.
+#[derive(Debug, Clone)]
+pub struct IntegrityStats {
+    pub wallet_count: i64,
+    pub transfer_count: i64,
+    pub has_sequence_gaps: bool,
+    pub invalid_wallet_refs: i64,
+    pub invalid_amounts: i64,
+}
+
 /// Repository for persisting and querying wallets and transfers.
 pub struct Repository {
     pool: SqlitePool,
@@ -295,6 +305,197 @@ impl Repository {
         .context("Failed to compute balance")?;
 
         Ok(row.get("balance"))
+    }
+
+    /// Compute balances for all wallets in a single query.
+    /// Returns a map of wallet_id -> balance. Wallets with no transfers won't be in the map (balance = 0).
+    pub async fn compute_all_balances(&self) -> Result<std::collections::HashMap<WalletId, Cents>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                wallet_id,
+                SUM(amount) as balance
+            FROM (
+                SELECT to_wallet_id as wallet_id, amount_cents as amount FROM transfers
+                UNION ALL
+                SELECT from_wallet_id as wallet_id, -amount_cents as amount FROM transfers
+            )
+            GROUP BY wallet_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to compute all balances")?;
+
+        let mut balances = std::collections::HashMap::new();
+        for row in rows {
+            let wallet_id_str: String = row.get("wallet_id");
+            let balance: Cents = row.get("balance");
+            let wallet_id = Uuid::parse_str(&wallet_id_str).context("Invalid wallet ID")?;
+            balances.insert(wallet_id, balance);
+        }
+
+        Ok(balances)
+    }
+
+    /// Get all transfers that reverse a given transfer (for partial reversal tracking).
+    pub async fn get_reversals_for_transfer(
+        &self,
+        transfer_id: TransferId,
+    ) -> Result<Vec<Transfer>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, sequence, from_wallet_id, to_wallet_id, amount_cents, timestamp, recorded_at, description, category, tags, reverses, external_ref
+            FROM transfers
+            WHERE reverses = ?
+            ORDER BY sequence
+            "#,
+        )
+        .bind(transfer_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get reversals")?;
+
+        rows.iter().map(Self::row_to_transfer).collect()
+    }
+
+    /// Get total amount already reversed for a transfer.
+    pub async fn get_total_reversed(&self, transfer_id: TransferId) -> Result<Cents> {
+        let row = sqlx::query(
+            r#"
+            SELECT COALESCE(SUM(amount_cents), 0) as total
+            FROM transfers
+            WHERE reverses = ?
+            "#,
+        )
+        .bind(transfer_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to get total reversed")?;
+
+        Ok(row.get("total"))
+    }
+
+    /// Count transfers for a wallet (incoming and outgoing separately).
+    pub async fn count_transfers_for_wallet(&self, wallet_id: WalletId) -> Result<(i64, i64)> {
+        let wallet_id_str = wallet_id.to_string();
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COALESCE(SUM(CASE WHEN to_wallet_id = ? THEN 1 ELSE 0 END), 0) as incoming,
+                COALESCE(SUM(CASE WHEN from_wallet_id = ? THEN 1 ELSE 0 END), 0) as outgoing
+            FROM transfers
+            WHERE from_wallet_id = ? OR to_wallet_id = ?
+            "#,
+        )
+        .bind(&wallet_id_str)
+        .bind(&wallet_id_str)
+        .bind(&wallet_id_str)
+        .bind(&wallet_id_str)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to count transfers")?;
+
+        Ok((row.get("incoming"), row.get("outgoing")))
+    }
+
+    /// Get the last transfer timestamp for a wallet.
+    pub async fn get_last_activity(&self, wallet_id: WalletId) -> Result<Option<DateTime<Utc>>> {
+        let wallet_id_str = wallet_id.to_string();
+
+        let row = sqlx::query(
+            r#"
+            SELECT MAX(timestamp) as last_activity
+            FROM transfers
+            WHERE from_wallet_id = ? OR to_wallet_id = ?
+            "#,
+        )
+        .bind(&wallet_id_str)
+        .bind(&wallet_id_str)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to get last activity")?;
+
+        let last_activity_str: Option<String> = row.get("last_activity");
+        match last_activity_str {
+            Some(s) => Ok(Some(
+                DateTime::parse_from_rfc3339(&s)
+                    .context("Invalid timestamp")?
+                    .with_timezone(&Utc),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Get statistics for integrity checking.
+    pub async fn get_integrity_stats(&self) -> Result<IntegrityStats> {
+        // Count wallets
+        let wallet_count: i64 = sqlx::query("SELECT COUNT(*) as count FROM wallets")
+            .fetch_one(&self.pool)
+            .await?
+            .get("count");
+
+        // Count transfers
+        let transfer_count: i64 = sqlx::query("SELECT COUNT(*) as count FROM transfers")
+            .fetch_one(&self.pool)
+            .await?
+            .get("count");
+
+        // Check for sequence gaps
+        let sequence_check = sqlx::query(
+            r#"
+            SELECT
+                MIN(sequence) as min_seq,
+                MAX(sequence) as max_seq,
+                COUNT(*) as count
+            FROM transfers
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let min_seq: Option<i64> = sequence_check.get("min_seq");
+        let max_seq: Option<i64> = sequence_check.get("max_seq");
+        let count: i64 = sequence_check.get("count");
+
+        let has_sequence_gaps = match (min_seq, max_seq) {
+            (Some(min), Some(max)) => (max - min + 1) != count,
+            _ => false,
+        };
+
+        // Check for invalid wallet references
+        let invalid_refs: i64 = sqlx::query(
+            r#"
+            SELECT COUNT(*) as count
+            FROM transfers t
+            WHERE NOT EXISTS (SELECT 1 FROM wallets w WHERE w.id = t.from_wallet_id)
+               OR NOT EXISTS (SELECT 1 FROM wallets w WHERE w.id = t.to_wallet_id)
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get("count");
+
+        // Check for invalid amounts
+        let invalid_amounts: i64 = sqlx::query(
+            r#"
+            SELECT COUNT(*) as count
+            FROM transfers
+            WHERE amount_cents <= 0
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get("count");
+
+        Ok(IntegrityStats {
+            wallet_count,
+            transfer_count,
+            has_sequence_gaps,
+            invalid_wallet_refs: invalid_refs,
+            invalid_amounts,
+        })
     }
 
     fn row_to_transfer(row: &sqlx::sqlite::SqliteRow) -> Result<Transfer> {

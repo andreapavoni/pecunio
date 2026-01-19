@@ -1,11 +1,11 @@
-// Application layer - use cases and orchestration
-// For Phase 1, the CLI directly uses the repository.
-// This module will be expanded in later phases with:
-// - Command/Query separation
-// - Validation logic
-// - Budget tracking
-// - Forecasting
+//! Application layer - use cases and orchestration.
+//!
+//! This module provides the `LedgerService` which is the primary interface
+//! for interacting with the ledger. All business logic and validation lives here,
+//! making it easy to build different interfaces (CLI, API, TUI) on top.
 
 pub mod error;
+pub mod service;
 
 pub use error::*;
+pub use service::*;
