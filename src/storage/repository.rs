@@ -684,8 +684,7 @@ impl Repository {
             SELECT
                 category,
                 COUNT(*) as count,
-                SUM(amount_cents) as total,
-                AVG(amount_cents) as average
+                SUM(amount_cents) as total
             FROM transfers
             WHERE category IS NOT NULL
               AND timestamp >= ?
@@ -702,11 +701,15 @@ impl Repository {
 
         let mut results = Vec::new();
         for row in rows {
+            let count: i64 = row.get("count");
+            let total: Cents = row.get("total");
+            let average = if count > 0 { total / count } else { 0 };
+
             results.push(crate::application::CategoryAggregate {
                 category: row.get("category"),
-                count: row.get("count"),
-                total: row.get("total"),
-                average: row.get("average"),
+                count,
+                total,
+                average,
             });
         }
 

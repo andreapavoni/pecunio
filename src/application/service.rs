@@ -7,7 +7,10 @@ use crate::domain::{
 };
 use crate::storage::Repository;
 
-use super::AppError;
+use super::{
+    AppError, CashFlowPeriod, CashFlowReport, CategoryReport, CategorySummary, IncomeExpenseReport,
+    NetWorthReport, PeriodComparisonReport, PeriodSummary, WalletBalance,
+};
 
 /// Application service providing high-level operations for the ledger.
 /// This is the primary interface for any client (CLI, API, TUI, etc.).
@@ -920,5 +923,361 @@ impl LedgerService {
             end_date,
             snapshots,
         })
+    }
+
+    // ========================
+    // Reporting methods
+    // ========================
+
+    /// Generate a category spending report for the given date range.
+    pub async fn get_category_report(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+    ) -> Result<CategoryReport, AppError> {
+        let aggregates = self.repo.aggregate_by_category(from_date, to_date).await?;
+
+        let total: Cents = aggregates.iter().map(|a| a.total).sum();
+
+        let categories: Vec<CategorySummary> = aggregates
+            .into_iter()
+            .map(|agg| CategorySummary {
+                category: agg.category,
+                total: agg.total,
+                count: agg.count,
+                average: agg.average,
+                percentage: if total > 0 {
+                    (agg.total as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+
+        Ok(CategoryReport {
+            from_date,
+            to_date,
+            categories,
+            total,
+        })
+    }
+
+    /// Generate an income vs expense report for the given date range.
+    pub async fn get_income_expense_report(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+    ) -> Result<IncomeExpenseReport, AppError> {
+        let wallet_type_aggregates = self
+            .repo
+            .aggregate_by_wallet_type(from_date, to_date)
+            .await?;
+
+        // Income: money flowing FROM income wallets (outflow from income wallet perspective)
+        let total_income = wallet_type_aggregates
+            .get(&WalletType::Income)
+            .map(|(_, outflow)| *outflow)
+            .unwrap_or(0);
+
+        // Expense: money flowing TO expense wallets (inflow from expense wallet perspective)
+        let total_expense = wallet_type_aggregates
+            .get(&WalletType::Expense)
+            .map(|(inflow, _)| *inflow)
+            .unwrap_or(0);
+
+        let net = total_income - total_expense;
+
+        // Get category breakdowns
+        let all_categories = self.repo.aggregate_by_category(from_date, to_date).await?;
+
+        // For now, we'll treat all categories as expenses (simplified)
+        // In a more sophisticated version, we'd track income categories separately
+        let expense_categories: Vec<CategorySummary> = all_categories
+            .into_iter()
+            .map(|agg| CategorySummary {
+                category: agg.category,
+                total: agg.total,
+                count: agg.count,
+                average: agg.average,
+                percentage: if total_expense > 0 {
+                    (agg.total as f64 / total_expense as f64) * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+
+        Ok(IncomeExpenseReport {
+            from_date,
+            to_date,
+            total_income,
+            total_expense,
+            net,
+            income_categories: Vec::new(), // Simplified for now
+            expense_categories,
+        })
+    }
+
+    /// Generate a cash flow report by time period.
+    pub async fn get_cashflow_report(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+        period: PeriodType,
+    ) -> Result<CashFlowReport, AppError> {
+        use chrono::{Datelike, Duration};
+
+        let mut periods = Vec::new();
+        let mut current = from_date;
+
+        while current < to_date {
+            let (period_start, period_end) = match period {
+                PeriodType::Weekly => {
+                    let start = current;
+                    let end = (current + Duration::days(7)).min(to_date);
+                    (start, end)
+                }
+                PeriodType::Monthly => {
+                    let start = current;
+                    let next_month = if current.month() == 12 {
+                        current
+                            .date_naive()
+                            .with_year(current.year() + 1)
+                            .unwrap()
+                            .with_month(1)
+                            .unwrap()
+                    } else {
+                        current
+                            .date_naive()
+                            .with_month(current.month() + 1)
+                            .unwrap()
+                    };
+                    let end = next_month
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                        .and_utc()
+                        .min(to_date);
+                    (start, end)
+                }
+                PeriodType::Yearly => {
+                    let start = current;
+                    let next_year = current
+                        .date_naive()
+                        .with_year(current.year() + 1)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                        .and_utc();
+                    let end = next_year.min(to_date);
+                    (start, end)
+                }
+            };
+
+            // Get wallet type aggregates for this period
+            let wallet_type_aggregates = self
+                .repo
+                .aggregate_by_wallet_type(period_start, period_end)
+                .await?;
+
+            // Calculate inflow (money coming into asset wallets)
+            let inflow = wallet_type_aggregates
+                .get(&WalletType::Asset)
+                .map(|(inflow, _)| *inflow)
+                .unwrap_or(0);
+
+            // Calculate outflow (money leaving asset wallets)
+            let outflow = wallet_type_aggregates
+                .get(&WalletType::Asset)
+                .map(|(_, outflow)| *outflow)
+                .unwrap_or(0);
+
+            let net = inflow - outflow;
+
+            periods.push(CashFlowPeriod {
+                period_start,
+                period_end,
+                inflow,
+                outflow,
+                net,
+            });
+
+            current = period_end;
+        }
+
+        Ok(CashFlowReport {
+            from_date,
+            to_date,
+            periods,
+        })
+    }
+
+    /// Generate a net worth report (current assets - liabilities).
+    pub async fn get_net_worth_report(&self) -> Result<NetWorthReport, AppError> {
+        let wallets = self.list_wallets(false).await?;
+        let balances = self.repo.compute_all_balances().await?;
+
+        let mut total_assets: Cents = 0;
+        let mut total_liabilities: Cents = 0;
+        let mut assets = Vec::new();
+        let mut liabilities = Vec::new();
+
+        for wallet in wallets {
+            let balance = balances.get(&wallet.id).copied().unwrap_or(0);
+
+            match wallet.wallet_type {
+                WalletType::Asset => {
+                    total_assets += balance;
+                    assets.push(WalletBalance {
+                        wallet_name: wallet.name.clone(),
+                        balance,
+                    });
+                }
+                WalletType::Liability => {
+                    // Liabilities are typically negative, so we negate for display
+                    total_liabilities += balance.abs();
+                    liabilities.push(WalletBalance {
+                        wallet_name: wallet.name.clone(),
+                        balance: balance.abs(),
+                    });
+                }
+                _ => {} // Ignore income, expense, equity for net worth calculation
+            }
+        }
+
+        let net_worth = total_assets - total_liabilities;
+
+        Ok(NetWorthReport {
+            as_of: Utc::now(),
+            total_assets,
+            total_liabilities,
+            net_worth,
+            assets,
+            liabilities,
+        })
+    }
+
+    /// Generate a period comparison report (current vs previous period).
+    pub async fn get_period_comparison(
+        &self,
+        period: PeriodType,
+    ) -> Result<PeriodComparisonReport, AppError> {
+        use chrono::{Datelike, Duration};
+
+        let now = Utc::now();
+        let (current_start, current_end) = period.current_period(now);
+
+        // Calculate previous period
+        let (previous_start, previous_end) = match period {
+            PeriodType::Weekly => {
+                let prev_end = current_start;
+                let prev_start = prev_end - Duration::days(7);
+                (prev_start, prev_end)
+            }
+            PeriodType::Monthly => {
+                let prev_end = current_start;
+                let prev_start = if current_start.month() == 1 {
+                    current_start
+                        .date_naive()
+                        .with_year(current_start.year() - 1)
+                        .unwrap()
+                        .with_month(12)
+                        .unwrap()
+                } else {
+                    current_start
+                        .date_naive()
+                        .with_month(current_start.month() - 1)
+                        .unwrap()
+                };
+                (prev_start.and_hms_opt(0, 0, 0).unwrap().and_utc(), prev_end)
+            }
+            PeriodType::Yearly => {
+                let prev_end = current_start;
+                let prev_start = current_start
+                    .date_naive()
+                    .with_year(current_start.year() - 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc();
+                (prev_start, prev_end)
+            }
+        };
+
+        // Get current period stats
+        let current_wallet_types = self
+            .repo
+            .aggregate_by_wallet_type(current_start, current_end)
+            .await?;
+        let current_income = current_wallet_types
+            .get(&WalletType::Income)
+            .map(|(_, outflow)| *outflow)
+            .unwrap_or(0);
+        let current_expense = current_wallet_types
+            .get(&WalletType::Expense)
+            .map(|(inflow, _)| *inflow)
+            .unwrap_or(0);
+        let current_net = current_income - current_expense;
+
+        // Get previous period stats
+        let previous_wallet_types = self
+            .repo
+            .aggregate_by_wallet_type(previous_start, previous_end)
+            .await?;
+        let previous_income = previous_wallet_types
+            .get(&WalletType::Income)
+            .map(|(_, outflow)| *outflow)
+            .unwrap_or(0);
+        let previous_expense = previous_wallet_types
+            .get(&WalletType::Expense)
+            .map(|(inflow, _)| *inflow)
+            .unwrap_or(0);
+        let previous_net = previous_income - previous_expense;
+
+        let change = current_net - previous_net;
+        let change_percentage = if previous_net != 0 {
+            ((change as f64) / (previous_net as f64)) * 100.0
+        } else {
+            0.0
+        };
+
+        Ok(PeriodComparisonReport {
+            current_period: PeriodSummary {
+                period_start: current_start,
+                period_end: current_end,
+                total_income: current_income,
+                total_expense: current_expense,
+                net: current_net,
+            },
+            previous_period: PeriodSummary {
+                period_start: previous_start,
+                period_end: previous_end,
+                total_income: previous_income,
+                total_expense: previous_expense,
+                net: previous_net,
+            },
+            change,
+            change_percentage,
+        })
+    }
+
+    // ========================
+    // Helper methods for import/export
+    // ========================
+
+    /// List all transfers without filtering
+    pub async fn list_all_transfers(&self) -> Result<Vec<Transfer>, AppError> {
+        self.repo
+            .list_transfers()
+            .await
+            .map_err(|e| AppError::Database(e))
+    }
+
+    /// Get wallet by ID (for export)
+    pub async fn get_wallet_by_id(&self, id: WalletId) -> Result<Wallet, AppError> {
+        self.repo
+            .get_wallet(id)
+            .await
+            .map_err(|e| AppError::Database(e))?
+            .ok_or_else(|| AppError::WalletNotFound(id.to_string()))
     }
 }

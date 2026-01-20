@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
@@ -129,6 +129,50 @@ pub enum Commands {
         /// Filter by specific wallet (omit for all wallets)
         #[arg(long)]
         wallet: Option<String>,
+    },
+
+    /// Generate reports and analytics
+    #[command(subcommand)]
+    Report(ReportCommands),
+
+    /// Export data to CSV or JSON
+    Export {
+        /// What to export: transfers, balances, budgets, scheduled, full
+        export_type: String,
+
+        /// Output file (stdout if omitted)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Format: csv, json (default: csv for most types, json for full)
+        #[arg(short, long)]
+        format: Option<String>,
+    },
+
+    /// Import data from CSV or JSON
+    Import {
+        /// What to import: transfers, full
+        import_type: String,
+
+        /// Input file (stdin if omitted)
+        #[arg(short, long)]
+        input: Option<String>,
+
+        /// Preview without importing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip duplicate records
+        #[arg(long)]
+        skip_duplicates: bool,
+
+        /// Create wallets that don't exist
+        #[arg(long)]
+        create_wallets: bool,
+
+        /// Validate without importing
+        #[arg(long)]
+        validate: bool,
     },
 }
 
@@ -298,6 +342,76 @@ pub enum ScheduledCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ReportCommands {
+    /// Category spending breakdown
+    Spending {
+        /// Start date (YYYY-MM-DD, defaults to start of current month)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (YYYY-MM-DD, defaults to now)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Income vs Expense analysis
+    IncomeExpense {
+        /// Start date (YYYY-MM-DD, defaults to start of current month)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (YYYY-MM-DD, defaults to now)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Cash flow over time
+    Cashflow {
+        /// Start date (YYYY-MM-DD, defaults to start of current month)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (YYYY-MM-DD, defaults to now)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Period: weekly, monthly, yearly
+        #[arg(long, default_value = "monthly")]
+        period: String,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Net worth summary
+    NetWorth {
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Compare current period to previous
+    Compare {
+        /// Period: weekly, monthly, yearly
+        #[arg(long, default_value = "monthly")]
+        period: String,
+
+        /// Output format: table, json, csv
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+}
+
 impl Cli {
     async fn auto_execute_scheduled(&self, service: &LedgerService) -> Result<()> {
         let now = Utc::now();
@@ -461,6 +575,42 @@ impl Cli {
                 let service = LedgerService::connect(&self.database).await?;
                 run_forecast_command(&service, months, wallet.as_deref()).await?;
             }
+
+            Commands::Report(report_cmd) => {
+                let service = LedgerService::connect(&self.database).await?;
+                run_report_command(&service, report_cmd).await?;
+            }
+
+            Commands::Export {
+                export_type,
+                output,
+                format,
+            } => {
+                let service = LedgerService::connect(&self.database).await?;
+                run_export_command(&service, &export_type, output.as_deref(), format.as_deref())
+                    .await?;
+            }
+
+            Commands::Import {
+                import_type,
+                input,
+                dry_run,
+                skip_duplicates,
+                create_wallets,
+                validate,
+            } => {
+                let service = LedgerService::connect(&self.database).await?;
+                run_import_command(
+                    &service,
+                    &import_type,
+                    input.as_deref(),
+                    dry_run,
+                    skip_duplicates,
+                    create_wallets,
+                    validate,
+                )
+                .await?;
+            }
         }
 
         Ok(())
@@ -549,6 +699,498 @@ async fn run_wallet_command(service: &LedgerService, cmd: WalletCommands) -> Res
         }
     }
     Ok(())
+}
+
+async fn run_export_command(
+    service: &LedgerService,
+    export_type: &str,
+    output: Option<&str>,
+    format: Option<&str>,
+) -> Result<()> {
+    use crate::io::Exporter;
+    use std::fs::File;
+    use std::io::{stdout, Write};
+
+    let exporter = Exporter::new(service);
+
+    // Determine output writer
+    let mut file_handle: Option<File> = None;
+    let writer: Box<dyn Write> = match output {
+        Some(path) => {
+            let file = File::create(path)
+                .with_context(|| format!("Failed to create output file: {}", path))?;
+            file_handle = Some(file);
+            Box::new(file_handle.as_mut().unwrap())
+        }
+        None => Box::new(stdout()),
+    };
+
+    match export_type {
+        "transfers" => {
+            let count = exporter.export_transfers_csv(writer).await?;
+            if output.is_some() {
+                eprintln!("Exported {} transfers", count);
+            }
+        }
+        "balances" => {
+            let count = exporter.export_balances_csv(writer).await?;
+            if output.is_some() {
+                eprintln!("Exported {} balances", count);
+            }
+        }
+        "budgets" => {
+            let count = exporter.export_budgets_csv(writer).await?;
+            if output.is_some() {
+                eprintln!("Exported {} budgets", count);
+            }
+        }
+        "scheduled" => {
+            let count = exporter.export_scheduled_csv(writer).await?;
+            if output.is_some() {
+                eprintln!("Exported {} scheduled transfers", count);
+            }
+        }
+        "full" => {
+            let snapshot = exporter.export_full_json(writer).await?;
+            if output.is_some() {
+                eprintln!(
+                    "Exported full database: {} wallets, {} transfers, {} budgets, {} scheduled transfers",
+                    snapshot.wallets.len(),
+                    snapshot.transfers.len(),
+                    snapshot.budgets.len(),
+                    snapshot.scheduled_transfers.len()
+                );
+            }
+        }
+        _ => {
+            anyhow::bail!(
+                "Invalid export type '{}'. Valid types: transfers, balances, budgets, scheduled, full",
+                export_type
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_import_command(
+    service: &LedgerService,
+    import_type: &str,
+    input: Option<&str>,
+    dry_run: bool,
+    skip_duplicates: bool,
+    create_wallets: bool,
+    validate: bool,
+) -> Result<()> {
+    use crate::io::{ImportOptions, Importer};
+    use std::fs::File;
+    use std::io::{stdin, Read};
+
+    let importer = Importer::new(service);
+
+    // Determine input reader
+    let mut file_handle: Option<File> = None;
+    let reader: Box<dyn Read> = match input {
+        Some(path) => {
+            let file =
+                File::open(path).with_context(|| format!("Failed to open input file: {}", path))?;
+            file_handle = Some(file);
+            Box::new(file_handle.as_mut().unwrap())
+        }
+        None => Box::new(stdin()),
+    };
+
+    let options = ImportOptions {
+        dry_run,
+        skip_duplicates,
+        create_missing_wallets: create_wallets,
+        validate_only: validate,
+    };
+
+    let result = match import_type {
+        "transfers" => importer.import_transfers_csv(reader, options).await?,
+        "full" => importer.import_full_json(reader, options).await?,
+        _ => {
+            anyhow::bail!(
+                "Invalid import type '{}'. Valid types: transfers, full",
+                import_type
+            );
+        }
+    };
+
+    // Display results
+    if validate || dry_run {
+        println!("Validation successful");
+    } else {
+        println!("Import complete");
+    }
+    println!("  Imported: {}", result.imported);
+    println!("  Skipped:  {}", result.skipped);
+    println!("  Errors:   {}", result.errors.len());
+
+    if !result.errors.is_empty() {
+        println!("\nErrors:");
+        for error in result.errors.iter().take(10) {
+            println!(
+                "  Line {}: {}",
+                error.line,
+                error
+                    .field
+                    .as_ref()
+                    .map(|f| format!("{}: ", f))
+                    .unwrap_or_default()
+                    + &error.error
+            );
+        }
+        if result.errors.len() > 10 {
+            println!("  ... and {} more errors", result.errors.len() - 10);
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_report_command(service: &LedgerService, cmd: ReportCommands) -> Result<()> {
+    use crate::domain::PeriodType;
+
+    match cmd {
+        ReportCommands::Spending { from, to, format } => {
+            let (from_date, to_date) = parse_date_range(from, to)?;
+            let report = service.get_category_report(from_date, to_date).await?;
+
+            match format.as_str() {
+                "json" => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "csv" => {
+                    println!("category,total,count,average,percentage");
+                    for cat in &report.categories {
+                        println!(
+                            "{},{},{},{},{:.2}",
+                            cat.category, cat.total, cat.count, cat.average, cat.percentage
+                        );
+                    }
+                }
+                _ => {
+                    // Table format
+                    println!("Category Spending Report");
+                    println!(
+                        "Period: {} to {}",
+                        from_date.format("%Y-%m-%d"),
+                        to_date.format("%Y-%m-%d")
+                    );
+                    println!();
+                    println!(
+                        "{:<20} {:>12} {:>8} {:>12} {:>8}",
+                        "CATEGORY", "TOTAL", "COUNT", "AVERAGE", "PERCENT"
+                    );
+                    println!("{}", "-".repeat(65));
+
+                    for cat in &report.categories {
+                        println!(
+                            "{:<20} {:>12} {:>8} {:>12} {:>7.1}%",
+                            truncate(&cat.category, 20),
+                            format_cents(cat.total),
+                            cat.count,
+                            format_cents(cat.average),
+                            cat.percentage
+                        );
+                    }
+
+                    println!("{}", "-".repeat(65));
+                    println!("{:<20} {:>12}", "TOTAL", format_cents(report.total));
+                }
+            }
+        }
+
+        ReportCommands::IncomeExpense { from, to, format } => {
+            let (from_date, to_date) = parse_date_range(from, to)?;
+            let report = service
+                .get_income_expense_report(from_date, to_date)
+                .await?;
+
+            match format.as_str() {
+                "json" => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "csv" => {
+                    println!("type,amount");
+                    println!("income,{}", report.total_income);
+                    println!("expense,{}", report.total_expense);
+                    println!("net,{}", report.net);
+                }
+                _ => {
+                    // Table format
+                    println!("Income vs Expense Report");
+                    println!(
+                        "Period: {} to {}",
+                        from_date.format("%Y-%m-%d"),
+                        to_date.format("%Y-%m-%d")
+                    );
+                    println!();
+                    println!("Total Income:   {:>15}", format_cents(report.total_income));
+                    println!("Total Expense:  {:>15}", format_cents(report.total_expense));
+                    println!("{}", "-".repeat(32));
+                    println!("Net:            {:>15}", format_cents(report.net));
+
+                    if !report.expense_categories.is_empty() {
+                        println!();
+                        println!("Top Expense Categories:");
+                        for (i, cat) in report.expense_categories.iter().take(10).enumerate() {
+                            println!(
+                                "  {}. {:<18} {:>12} ({:.1}%)",
+                                i + 1,
+                                truncate(&cat.category, 18),
+                                format_cents(cat.total),
+                                cat.percentage
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        ReportCommands::Cashflow {
+            from,
+            to,
+            period,
+            format,
+        } => {
+            let (from_date, to_date) = parse_date_range(from, to)?;
+            let period_type = PeriodType::from_str(&period).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid period '{}'. Valid: weekly, monthly, yearly",
+                    period
+                )
+            })?;
+
+            let report = service
+                .get_cashflow_report(from_date, to_date, period_type)
+                .await?;
+
+            match format.as_str() {
+                "json" => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "csv" => {
+                    println!("period_start,period_end,inflow,outflow,net");
+                    for period in &report.periods {
+                        println!(
+                            "{},{},{},{},{}",
+                            period.period_start.format("%Y-%m-%d"),
+                            period.period_end.format("%Y-%m-%d"),
+                            period.inflow,
+                            period.outflow,
+                            period.net
+                        );
+                    }
+                }
+                _ => {
+                    // Table format
+                    println!("Cash Flow Report");
+                    println!(
+                        "Period: {} to {}",
+                        from_date.format("%Y-%m-%d"),
+                        to_date.format("%Y-%m-%d")
+                    );
+                    println!();
+                    println!(
+                        "{:<12} {:>12} {:>12} {:>12}",
+                        "PERIOD", "INFLOW", "OUTFLOW", "NET"
+                    );
+                    println!("{}", "-".repeat(52));
+
+                    for period in &report.periods {
+                        let period_label = period.period_start.format("%Y-%m-%d").to_string();
+                        println!(
+                            "{:<12} {:>12} {:>12} {:>12}",
+                            truncate(&period_label, 12),
+                            format_cents(period.inflow),
+                            format_cents(period.outflow),
+                            format_cents(period.net)
+                        );
+                    }
+                }
+            }
+        }
+
+        ReportCommands::NetWorth { format } => {
+            let report = service.get_net_worth_report().await?;
+
+            match format.as_str() {
+                "json" => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "csv" => {
+                    println!("type,wallet,balance");
+                    for asset in &report.assets {
+                        println!("asset,{},{}", asset.wallet_name, asset.balance);
+                    }
+                    for liability in &report.liabilities {
+                        println!("liability,{},{}", liability.wallet_name, liability.balance);
+                    }
+                }
+                _ => {
+                    // Table format
+                    println!("Net Worth Report");
+                    println!("As of: {}", report.as_of.format("%Y-%m-%d %H:%M:%S"));
+                    println!();
+
+                    if !report.assets.is_empty() {
+                        println!("Assets:");
+                        for asset in &report.assets {
+                            println!(
+                                "  {:<25} {:>15}",
+                                truncate(&asset.wallet_name, 25),
+                                format_cents(asset.balance)
+                            );
+                        }
+                        println!("  {:<25} {:>15}", "", "-".repeat(15));
+                        println!(
+                            "  {:<25} {:>15}",
+                            "Total Assets",
+                            format_cents(report.total_assets)
+                        );
+                        println!();
+                    }
+
+                    if !report.liabilities.is_empty() {
+                        println!("Liabilities:");
+                        for liability in &report.liabilities {
+                            println!(
+                                "  {:<25} {:>15}",
+                                truncate(&liability.wallet_name, 25),
+                                format_cents(liability.balance)
+                            );
+                        }
+                        println!("  {:<25} {:>15}", "", "-".repeat(15));
+                        println!(
+                            "  {:<25} {:>15}",
+                            "Total Liabilities",
+                            format_cents(report.total_liabilities)
+                        );
+                        println!();
+                    }
+
+                    println!("{}", "=".repeat(44));
+                    println!("{:<25} {:>15}", "Net Worth", format_cents(report.net_worth));
+                }
+            }
+        }
+
+        ReportCommands::Compare { period, format } => {
+            let period_type = PeriodType::from_str(&period).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid period '{}'. Valid: weekly, monthly, yearly",
+                    period
+                )
+            })?;
+
+            let report = service.get_period_comparison(period_type).await?;
+
+            match format.as_str() {
+                "json" => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "csv" => {
+                    println!("period,income,expense,net");
+                    println!(
+                        "current,{},{},{}",
+                        report.current_period.total_income,
+                        report.current_period.total_expense,
+                        report.current_period.net
+                    );
+                    println!(
+                        "previous,{},{},{}",
+                        report.previous_period.total_income,
+                        report.previous_period.total_expense,
+                        report.previous_period.net
+                    );
+                }
+                _ => {
+                    // Table format
+                    println!("Period Comparison Report");
+                    println!();
+
+                    println!(
+                        "Current Period: {} to {}",
+                        report.current_period.period_start.format("%Y-%m-%d"),
+                        report.current_period.period_end.format("%Y-%m-%d")
+                    );
+                    println!(
+                        "  Income:  {:>15}",
+                        format_cents(report.current_period.total_income)
+                    );
+                    println!(
+                        "  Expense: {:>15}",
+                        format_cents(report.current_period.total_expense)
+                    );
+                    println!("  Net:     {:>15}", format_cents(report.current_period.net));
+                    println!();
+
+                    println!(
+                        "Previous Period: {} to {}",
+                        report.previous_period.period_start.format("%Y-%m-%d"),
+                        report.previous_period.period_end.format("%Y-%m-%d")
+                    );
+                    println!(
+                        "  Income:  {:>15}",
+                        format_cents(report.previous_period.total_income)
+                    );
+                    println!(
+                        "  Expense: {:>15}",
+                        format_cents(report.previous_period.total_expense)
+                    );
+                    println!(
+                        "  Net:     {:>15}",
+                        format_cents(report.previous_period.net)
+                    );
+                    println!();
+
+                    println!("{}", "=".repeat(44));
+                    println!(
+                        "Change:  {:>15} ({:+.1}%)",
+                        format_cents(report.change),
+                        report.change_percentage
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_date_range(
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    use chrono::Datelike;
+
+    let now = Utc::now();
+
+    // Default to_date is now
+    let to_date = match to {
+        Some(date_str) => parse_date(&date_str)?,
+        None => now,
+    };
+
+    // Default from_date is start of current month
+    let from_date = match from {
+        Some(date_str) => parse_date(&date_str)?,
+        None => {
+            let first_of_month = now
+                .date_naive()
+                .with_day(1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
+            first_of_month
+        }
+    };
+
+    Ok((from_date, to_date))
 }
 
 async fn run_balance_command(service: &LedgerService, wallet: Option<String>) -> Result<()> {
