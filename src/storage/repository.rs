@@ -312,7 +312,7 @@ impl Repository {
     ) -> Result<Vec<Transfer>> {
         // Build query dynamically based on filters
         let mut query = String::from(
-            "SELECT id, sequence, from_wallet_id, to_wallet_id, amount_cents, timestamp, recorded_at, description, category, tags, reverses, external_ref FROM transfers WHERE 1=1"
+            "SELECT id, sequence, from_wallet_id, to_wallet_id, amount_cents, timestamp, recorded_at, description, category, tags, reverses, external_ref FROM transfers WHERE 1=1",
         );
 
         // Collect all string bindings first so they live long enough

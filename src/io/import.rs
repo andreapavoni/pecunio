@@ -3,7 +3,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use std::io::Read;
 
 use crate::application::LedgerService;
-use crate::domain::{parse_cents, WalletType};
+use crate::domain::{WalletType, parse_cents};
 use crate::io::export::DatabaseSnapshot;
 
 /// Result of an import operation

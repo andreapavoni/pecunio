@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 use crate::application::LedgerService;
-use crate::domain::{format_cents, parse_cents, WalletType};
+use crate::domain::{WalletType, format_cents, parse_cents};
 
 /// Pecunio - Personal Finance Ledger
 #[derive(Parser)]
@@ -710,7 +710,7 @@ async fn run_export_command(
 ) -> Result<()> {
     use crate::io::Exporter;
     use std::fs::File;
-    use std::io::{stdout, Write};
+    use std::io::{Write, stdout};
 
     let exporter = Exporter::new(service);
 
@@ -783,7 +783,7 @@ async fn run_import_command(
 ) -> Result<()> {
     use crate::io::{ImportOptions, Importer};
     use std::fs::File;
-    use std::io::{stdin, Read};
+    use std::io::{Read, stdin};
 
     let importer = Importer::new(service);
 

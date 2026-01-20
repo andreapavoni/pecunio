@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::domain::{
-    build_integrity_report, Budget, Cents, IntegrityReport, PeriodType, RecurrencePattern,
-    ScheduleStatus, ScheduledTransfer, Transfer, TransferId, Wallet, WalletId, WalletType,
+    Budget, Cents, IntegrityReport, PeriodType, RecurrencePattern, ScheduleStatus,
+    ScheduledTransfer, Transfer, TransferId, Wallet, WalletId, WalletType, build_integrity_report,
 };
 use crate::storage::Repository;
 
