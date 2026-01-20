@@ -1,23 +1,8 @@
+mod common;
+
 use anyhow::Result;
-use chrono::{DateTime, NaiveDate, Utc};
-use pecunio::application::LedgerService;
-use pecunio::domain::{PeriodType, WalletType};
-use tempfile::TempDir;
-
-async fn test_service() -> Result<(LedgerService, TempDir)> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-    let service = LedgerService::init(db_path.to_str().unwrap()).await?;
-    Ok((service, temp_dir))
-}
-
-fn parse_date(date_str: &str) -> DateTime<Utc> {
-    NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-        .unwrap()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-}
+use common::{parse_date, test_service};
+use pecunio::domain::{PeriodType, RecurrencePattern, WalletType};
 
 #[tokio::test]
 async fn test_category_report() -> Result<()> {
@@ -491,7 +476,6 @@ async fn test_auto_execution_integration() -> Result<()> {
         .await?;
 
     // Create a scheduled transfer that's overdue
-    use pecunio::domain::RecurrencePattern;
     let past_date = parse_date("2024-01-01");
 
     service

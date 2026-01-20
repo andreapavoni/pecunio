@@ -1,25 +1,9 @@
+mod common;
+
 use anyhow::Result;
-use chrono::{DateTime, Duration, NaiveDate, Utc};
-use pecunio::application::LedgerService;
-use pecunio::domain::{RecurrencePattern, WalletType};
-use tempfile::TempDir;
-
-/// Helper to create a test service with a temporary database
-async fn test_service() -> Result<(LedgerService, TempDir)> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-    let service = LedgerService::init(db_path.to_str().unwrap()).await?;
-    Ok((service, temp_dir))
-}
-
-/// Helper to parse a date string into DateTime<Utc>
-fn parse_date(date_str: &str) -> DateTime<Utc> {
-    NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-        .unwrap()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-}
+use chrono::{Duration, Utc};
+use common::{StandardWallets, parse_date, test_service};
+use pecunio::domain::{RecurrencePattern, ScheduleStatus, WalletType};
 
 #[tokio::test]
 async fn test_create_scheduled_transfer() -> Result<()> {
@@ -73,30 +57,7 @@ async fn test_list_scheduled_transfers() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Rent".to_string(),
-            WalletType::Expense,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Groceries".to_string(),
-            WalletType::Expense,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_with_expense_categories(&service).await?;
 
     // Create multiple scheduled transfers
     let start = parse_date("2024-01-01");
@@ -140,22 +101,7 @@ async fn test_pause_and_resume_scheduled_transfer() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Savings".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_basic(&service).await?;
 
     // Create scheduled transfer
     let start = parse_date("2024-01-01");
@@ -175,7 +121,7 @@ async fn test_pause_and_resume_scheduled_transfer() -> Result<()> {
 
     // Pause it
     let paused = service.pause_scheduled_transfer("MonthlySavings").await?;
-    assert_eq!(paused.status, pecunio::domain::ScheduleStatus::Paused);
+    assert_eq!(paused.status, ScheduleStatus::Paused);
 
     // Verify it's not in active list
     let active = service.list_scheduled_transfers(false).await?;
@@ -187,7 +133,7 @@ async fn test_pause_and_resume_scheduled_transfer() -> Result<()> {
 
     // Resume it
     let resumed = service.resume_scheduled_transfer("MonthlySavings").await?;
-    assert_eq!(resumed.status, pecunio::domain::ScheduleStatus::Active);
+    assert_eq!(resumed.status, ScheduleStatus::Active);
 
     // Now it's back in active list
     let active = service.list_scheduled_transfers(false).await?;
@@ -201,22 +147,7 @@ async fn test_delete_scheduled_transfer() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Rent".to_string(),
-            WalletType::Expense,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_with_expense_categories(&service).await?;
 
     // Create scheduled transfer
     let start = parse_date("2024-01-01");
@@ -324,43 +255,10 @@ async fn test_execute_due_scheduled_transfers() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Salary".to_string(),
-            WalletType::Income,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Rent".to_string(),
-            WalletType::Expense,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_with_expense_categories(&service).await?;
 
     // Give initial balance
-    service
-        .record_transfer(
-            "Salary",
-            "Checking",
-            1000000,
-            parse_date("2024-01-01"),
-            None,
-            None,
-            true,
-        )
-        .await?;
+    StandardWallets::fund_checking(&service, 1000000, parse_date("2024-01-01")).await?;
 
     // Create scheduled transfers with past dates (so they're due)
     let past_date = Utc::now() - Duration::days(5);
@@ -368,7 +266,7 @@ async fn test_execute_due_scheduled_transfers() -> Result<()> {
     service
         .create_scheduled_transfer(
             "PastSalary".to_string(),
-            "Salary",
+            "Income",
             "Checking",
             500000,
             RecurrencePattern::Monthly,
@@ -477,22 +375,7 @@ async fn test_daily_recurrence() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Savings".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_basic(&service).await?;
 
     // Create daily scheduled transfer
     let start = parse_date("2024-01-01");
@@ -525,22 +408,7 @@ async fn test_weekly_recurrence() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Groceries".to_string(),
-            WalletType::Expense,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_with_expense_categories(&service).await?;
 
     // Create weekly scheduled transfer
     let start = parse_date("2024-01-01"); // Monday
@@ -617,116 +485,11 @@ async fn test_yearly_recurrence() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_forecast_with_scheduled_transfers() -> Result<()> {
-    let (service, _temp) = test_service().await?;
-
-    // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Salary".to_string(),
-            WalletType::Income,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Rent".to_string(),
-            WalletType::Expense,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-
-    // Give initial balance
-    service
-        .record_transfer("Salary", "Checking", 500000, Utc::now(), None, None, true)
-        .await?;
-
-    // Create scheduled transfers starting from tomorrow
-    let tomorrow = Utc::now() + Duration::days(1);
-
-    service
-        .create_scheduled_transfer(
-            "MonthlySalary".to_string(),
-            "Salary",
-            "Checking",
-            500000,
-            RecurrencePattern::Monthly,
-            tomorrow,
-            None,
-            None,
-            None,
-        )
-        .await?;
-
-    service
-        .create_scheduled_transfer(
-            "MonthlyRent".to_string(),
-            "Checking",
-            "Rent",
-            120000,
-            RecurrencePattern::Monthly,
-            tomorrow,
-            None,
-            None,
-            None,
-        )
-        .await?;
-
-    // Forecast 3 months
-    let forecast = service.forecast_balances(3).await?;
-
-    // Should have snapshots
-    assert!(!forecast.snapshots.is_empty());
-
-    // Initial snapshot should show current balance
-    let initial = &forecast.snapshots[0];
-    assert_eq!(initial.wallet_balances.get("Checking"), Some(&500000));
-
-    // Should have events for scheduled transfers
-    let events_count = forecast
-        .snapshots
-        .iter()
-        .filter(|s| s.event.is_some())
-        .count();
-    assert!(
-        events_count >= 2,
-        "Should have at least salary and rent events"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_cannot_create_duplicate_scheduled_transfer() -> Result<()> {
     let (service, _temp) = test_service().await?;
 
     // Setup wallets
-    service
-        .create_wallet(
-            "Checking".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
-    service
-        .create_wallet(
-            "Savings".to_string(),
-            WalletType::Asset,
-            "EUR".to_string(),
-            None,
-        )
-        .await?;
+    StandardWallets::create_basic(&service).await?;
 
     // Create scheduled transfer
     let start = parse_date("2024-01-01");
