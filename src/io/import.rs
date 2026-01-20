@@ -23,23 +23,12 @@ pub struct ImportError {
 }
 
 /// Options for import operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImportOptions {
     pub dry_run: bool,
     pub skip_duplicates: bool,
     pub create_missing_wallets: bool,
     pub validate_only: bool,
-}
-
-impl Default for ImportOptions {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            skip_duplicates: false,
-            create_missing_wallets: false,
-            validate_only: false,
-        }
-    }
 }
 
 /// Importer for loading data into the ledger
@@ -196,8 +185,8 @@ impl<'a> Importer<'a> {
     ) -> Result<ImportResult> {
         let snapshot: DatabaseSnapshot = serde_json::from_reader(reader)?;
 
-        let mut imported = 0;
-        let mut skipped = 0;
+        let imported = 0;
+        let skipped = 0;
         let mut errors = Vec::new();
 
         if options.validate_only {

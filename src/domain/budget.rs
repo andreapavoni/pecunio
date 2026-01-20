@@ -23,15 +23,6 @@ impl PeriodType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "weekly" => Some(PeriodType::Weekly),
-            "monthly" => Some(PeriodType::Monthly),
-            "yearly" => Some(PeriodType::Yearly),
-            _ => None,
-        }
-    }
-
     /// Get the start and end of the current period for a given timestamp.
     pub fn current_period(&self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
         match self {
@@ -110,6 +101,19 @@ impl std::fmt::Display for PeriodType {
     }
 }
 
+impl std::str::FromStr for PeriodType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "weekly" => Ok(PeriodType::Weekly),
+            "monthly" => Ok(PeriodType::Monthly),
+            "yearly" => Ok(PeriodType::Yearly),
+            _ => Err(format!("Invalid period type: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Budget {
     pub id: BudgetId,
@@ -151,7 +155,7 @@ mod tests {
     fn test_period_type_roundtrip() {
         for pt in [PeriodType::Weekly, PeriodType::Monthly, PeriodType::Yearly] {
             let s = pt.as_str();
-            let parsed = PeriodType::from_str(s).unwrap();
+            let parsed: PeriodType = s.parse().unwrap();
             assert_eq!(pt, parsed);
         }
     }

@@ -25,21 +25,25 @@ impl RecurrencePattern {
             RecurrencePattern::Yearly => "yearly",
         }
     }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "daily" => Some(RecurrencePattern::Daily),
-            "weekly" => Some(RecurrencePattern::Weekly),
-            "monthly" => Some(RecurrencePattern::Monthly),
-            "yearly" => Some(RecurrencePattern::Yearly),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for RecurrencePattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for RecurrencePattern {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "daily" => Ok(RecurrencePattern::Daily),
+            "weekly" => Ok(RecurrencePattern::Weekly),
+            "monthly" => Ok(RecurrencePattern::Monthly),
+            "yearly" => Ok(RecurrencePattern::Yearly),
+            _ => Err(format!("Invalid recurrence pattern: {}", s)),
+        }
     }
 }
 
@@ -60,20 +64,24 @@ impl ScheduleStatus {
             ScheduleStatus::Completed => "completed",
         }
     }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "active" => Some(ScheduleStatus::Active),
-            "paused" => Some(ScheduleStatus::Paused),
-            "completed" => Some(ScheduleStatus::Completed),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for ScheduleStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ScheduleStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "active" => Ok(ScheduleStatus::Active),
+            "paused" => Ok(ScheduleStatus::Paused),
+            "completed" => Ok(ScheduleStatus::Completed),
+            _ => Err(format!("Invalid schedule status: {}", s)),
+        }
     }
 }
 
@@ -315,7 +323,7 @@ mod tests {
 
         for pattern in patterns {
             let s = pattern.as_str();
-            let parsed = RecurrencePattern::from_str(s).unwrap();
+            let parsed: RecurrencePattern = s.parse().unwrap();
             assert_eq!(pattern, parsed);
         }
     }
@@ -330,7 +338,7 @@ mod tests {
 
         for status in statuses {
             let s = status.as_str();
-            let parsed = ScheduleStatus::from_str(s).unwrap();
+            let parsed: ScheduleStatus = s.parse().unwrap();
             assert_eq!(status, parsed);
         }
     }

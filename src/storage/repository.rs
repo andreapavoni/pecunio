@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::domain::{Cents, Transfer, TransferId, Wallet, WalletId, WalletType};
+use crate::domain::{Cents, Transfer, TransferId, Wallet, WalletId};
 
 use super::{
     MIGRATION_001_INITIAL, MIGRATION_002_BUDGETS, MIGRATION_003_SCHEDULED, MIGRATION_004_REPORTING,
@@ -174,8 +174,9 @@ impl Repository {
         Ok(Wallet {
             id: Uuid::parse_str(&id_str).context("Invalid wallet ID")?,
             name: row.get("name"),
-            wallet_type: WalletType::from_str(&wallet_type_str)
-                .ok_or_else(|| anyhow::anyhow!("Invalid wallet type: {}", wallet_type_str))?,
+            wallet_type: wallet_type_str.parse().map_err(|e| {
+                anyhow::anyhow!("Invalid wallet type: {}. Error: {}", wallet_type_str, e)
+            })?,
             currency: row.get("currency"),
             allow_negative: row.get::<i32, _>("allow_negative") != 0,
             description: row.get("description"),
@@ -744,7 +745,7 @@ impl Repository {
         let mut results = std::collections::HashMap::new();
         for row in rows {
             let wallet_type_str: String = row.get("wallet_type");
-            if let Some(wallet_type) = crate::domain::WalletType::from_str(&wallet_type_str) {
+            if let Ok(wallet_type) = wallet_type_str.parse::<crate::domain::WalletType>() {
                 let inflow: Cents = row.get("inflow");
                 let outflow: Cents = row.get("outflow");
                 results.insert(wallet_type, (inflow, outflow));
@@ -899,8 +900,6 @@ impl Repository {
     fn row_to_scheduled_transfer(
         row: &sqlx::sqlite::SqliteRow,
     ) -> Result<crate::domain::ScheduledTransfer> {
-        use crate::domain::{RecurrencePattern, ScheduleStatus};
-
         let id_str: String = row.get("id");
         let from_wallet_str: String = row.get("from_wallet_id");
         let to_wallet_str: String = row.get("to_wallet_id");
@@ -917,8 +916,9 @@ impl Repository {
             from_wallet: Uuid::parse_str(&from_wallet_str).context("Invalid from_wallet ID")?,
             to_wallet: Uuid::parse_str(&to_wallet_str).context("Invalid to_wallet ID")?,
             amount_cents: row.get("amount_cents"),
-            pattern: RecurrencePattern::from_str(&pattern_str)
-                .ok_or_else(|| anyhow::anyhow!("Invalid recurrence pattern: {}", pattern_str))?,
+            pattern: pattern_str.parse().map_err(|e| {
+                anyhow::anyhow!("Invalid recurrence pattern: {}. Error: {}", pattern_str, e)
+            })?,
             start_date: DateTime::parse_from_rfc3339(&start_date_str)
                 .context("Invalid start_date")?
                 .with_timezone(&Utc),
@@ -934,8 +934,9 @@ impl Repository {
                 .map(|dt| dt.with_timezone(&Utc)),
             description: row.get("description"),
             category: row.get("category"),
-            status: ScheduleStatus::from_str(&status_str)
-                .ok_or_else(|| anyhow::anyhow!("Invalid schedule status: {}", status_str))?,
+            status: status_str.parse().map_err(|e| {
+                anyhow::anyhow!("Invalid schedule status: {}. Error: {}", status_str, e)
+            })?,
             created_at: DateTime::parse_from_rfc3339(&created_at_str)
                 .context("Invalid created_at")?
                 .with_timezone(&Utc),
@@ -943,8 +944,6 @@ impl Repository {
     }
 
     fn row_to_budget(row: &sqlx::sqlite::SqliteRow) -> Result<crate::domain::Budget> {
-        use crate::domain::PeriodType;
-
         let id_str: String = row.get("id");
         let period_type_str: String = row.get("period_type");
         let created_at_str: String = row.get("created_at");
@@ -953,8 +952,9 @@ impl Repository {
             id: Uuid::parse_str(&id_str).context("Invalid budget ID")?,
             name: row.get("name"),
             category: row.get("category"),
-            period_type: PeriodType::from_str(&period_type_str)
-                .ok_or_else(|| anyhow::anyhow!("Invalid period type: {}", period_type_str))?,
+            period_type: period_type_str.parse().map_err(|e| {
+                anyhow::anyhow!("Invalid period type: {}. Error: {}", period_type_str, e)
+            })?,
             amount_cents: row.get("amount_cents"),
             created_at: DateTime::parse_from_rfc3339(&created_at_str)
                 .context("Invalid created_at timestamp")?

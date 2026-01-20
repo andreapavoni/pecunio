@@ -33,7 +33,7 @@ impl<'a> Exporter<'a> {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         // Write header
-        csv_writer.write_record(&[
+        csv_writer.write_record([
             "id",
             "sequence",
             "timestamp",
@@ -82,12 +82,12 @@ impl<'a> Exporter<'a> {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         // Write header
-        csv_writer.write_record(&["wallet", "type", "currency", "balance"])?;
+        csv_writer.write_record(["wallet", "type", "currency", "balance"])?;
 
         let mut count = 0;
         for wallet in &wallets {
             let balance = self.service.get_balance(&wallet.name).await?;
-            csv_writer.write_record(&[
+            csv_writer.write_record([
                 &wallet.name,
                 wallet.wallet_type.as_str(),
                 &wallet.currency,
@@ -106,11 +106,11 @@ impl<'a> Exporter<'a> {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         // Write header
-        csv_writer.write_record(&["name", "category", "amount_cents", "period"])?;
+        csv_writer.write_record(["name", "category", "amount_cents", "period"])?;
 
         let mut count = 0;
         for budget in &budgets {
-            csv_writer.write_record(&[
+            csv_writer.write_record([
                 &budget.name,
                 &budget.category,
                 &budget.amount_cents.to_string(),
@@ -129,7 +129,7 @@ impl<'a> Exporter<'a> {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         // Write header
-        csv_writer.write_record(&[
+        csv_writer.write_record([
             "name",
             "from_wallet",
             "to_wallet",
@@ -147,7 +147,7 @@ impl<'a> Exporter<'a> {
             let from_wallet = self.service.get_wallet_by_id(st.from_wallet).await?;
             let to_wallet = self.service.get_wallet_by_id(st.to_wallet).await?;
 
-            csv_writer.write_record(&[
+            csv_writer.write_record([
                 &st.name,
                 &from_wallet.name,
                 &to_wallet.name,

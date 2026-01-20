@@ -208,6 +208,7 @@ impl LedgerService {
     // ========================
 
     /// Record a new transfer.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_transfer(
         &self,
         from_wallet_name: &str,
@@ -534,6 +535,7 @@ impl LedgerService {
     // ========================
 
     /// Create a new scheduled transfer.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_scheduled_transfer(
         &self,
         name: String,
@@ -1266,10 +1268,7 @@ impl LedgerService {
 
     /// List all transfers without filtering
     pub async fn list_all_transfers(&self) -> Result<Vec<Transfer>, AppError> {
-        self.repo
-            .list_transfers()
-            .await
-            .map_err(|e| AppError::Database(e))
+        self.repo.list_transfers().await.map_err(AppError::Database)
     }
 
     /// Get wallet by ID (for export)
@@ -1277,7 +1276,7 @@ impl LedgerService {
         self.repo
             .get_wallet(id)
             .await
-            .map_err(|e| AppError::Database(e))?
+            .map_err(AppError::Database)?
             .ok_or_else(|| AppError::WalletNotFound(id.to_string()))
     }
 }

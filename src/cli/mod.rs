@@ -625,10 +625,11 @@ async fn run_wallet_command(service: &LedgerService, cmd: WalletCommands) -> Res
             currency,
             description,
         } => {
-            let wt = WalletType::from_str(&wallet_type).ok_or_else(|| {
+            let wt: WalletType = wallet_type.parse().map_err(|e| {
                 anyhow::anyhow!(
-                    "Invalid wallet type '{}'. Valid types: asset, liability, income, expense, equity",
-                    wallet_type
+                    "Invalid wallet type '{}'. Valid types: asset, liability, income, expense, equity. Error: {}",
+                    wallet_type,
+                    e
                 )
             })?;
 
@@ -705,7 +706,7 @@ async fn run_export_command(
     service: &LedgerService,
     export_type: &str,
     output: Option<&str>,
-    format: Option<&str>,
+    _format: Option<&str>,
 ) -> Result<()> {
     use crate::io::Exporter;
     use std::fs::File;
@@ -714,13 +715,11 @@ async fn run_export_command(
     let exporter = Exporter::new(service);
 
     // Determine output writer
-    let mut file_handle: Option<File> = None;
     let writer: Box<dyn Write> = match output {
         Some(path) => {
             let file = File::create(path)
                 .with_context(|| format!("Failed to create output file: {}", path))?;
-            file_handle = Some(file);
-            Box::new(file_handle.as_mut().unwrap())
+            Box::new(file)
         }
         None => Box::new(stdout()),
     };
@@ -789,13 +788,11 @@ async fn run_import_command(
     let importer = Importer::new(service);
 
     // Determine input reader
-    let mut file_handle: Option<File> = None;
     let reader: Box<dyn Read> = match input {
         Some(path) => {
             let file =
                 File::open(path).with_context(|| format!("Failed to open input file: {}", path))?;
-            file_handle = Some(file);
-            Box::new(file_handle.as_mut().unwrap())
+            Box::new(file)
         }
         None => Box::new(stdin()),
     };
@@ -957,10 +954,11 @@ async fn run_report_command(service: &LedgerService, cmd: ReportCommands) -> Res
             format,
         } => {
             let (from_date, to_date) = parse_date_range(from, to)?;
-            let period_type = PeriodType::from_str(&period).ok_or_else(|| {
+            let period_type: PeriodType = period.parse().map_err(|e| {
                 anyhow::anyhow!(
-                    "Invalid period '{}'. Valid: weekly, monthly, yearly",
-                    period
+                    "Invalid period '{}'. Valid: weekly, monthly, yearly. Error: {}",
+                    period,
+                    e
                 )
             })?;
 
@@ -1079,10 +1077,11 @@ async fn run_report_command(service: &LedgerService, cmd: ReportCommands) -> Res
         }
 
         ReportCommands::Compare { period, format } => {
-            let period_type = PeriodType::from_str(&period).ok_or_else(|| {
+            let period_type: PeriodType = period.parse().map_err(|e| {
                 anyhow::anyhow!(
-                    "Invalid period '{}'. Valid: weekly, monthly, yearly",
-                    period
+                    "Invalid period '{}'. Valid: weekly, monthly, yearly. Error: {}",
+                    period,
+                    e
                 )
             })?;
 
@@ -1178,16 +1177,13 @@ fn parse_date_range(
     // Default from_date is start of current month
     let from_date = match from {
         Some(date_str) => parse_date(&date_str)?,
-        None => {
-            let first_of_month = now
-                .date_naive()
-                .with_day(1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_utc();
-            first_of_month
-        }
+        None => now
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc(),
     };
 
     Ok((from_date, to_date))
@@ -1261,8 +1257,8 @@ async fn run_transfers_command(
         let wallet_names = service.get_wallet_names().await?;
 
         println!(
-            "{:<12} {:>10} {:<15} {:<15} {}",
-            "DATE", "AMOUNT", "FROM", "TO", "DESCRIPTION"
+            "{:<12} {:>10} {:<15} {:<15} DESCRIPTION",
+            "DATE", "AMOUNT", "FROM", "TO"
         );
         println!("{}", "-".repeat(70));
 
@@ -1443,10 +1439,11 @@ async fn run_budget_command(service: &LedgerService, cmd: BudgetCommands) -> Res
             let amount_cents =
                 parse_cents(&amount).context("Invalid amount format. Use '400.00' or '400'")?;
 
-            let period_type = PeriodType::from_str(&period).ok_or_else(|| {
+            let period_type: PeriodType = period.parse().map_err(|e| {
                 anyhow::anyhow!(
-                    "Invalid period type '{}'. Valid types: weekly, monthly, yearly",
-                    period
+                    "Invalid period type '{}'. Valid types: weekly, monthly, yearly. Error: {}",
+                    period,
+                    e
                 )
             })?;
 
@@ -1532,8 +1529,9 @@ async fn run_scheduled_command(service: &LedgerService, command: ScheduledComman
             category,
         } => {
             let amount_cents = parse_cents(&amount)?;
-            let pattern = RecurrencePattern::from_str(&pattern)
-                .ok_or_else(|| anyhow::anyhow!("Invalid pattern: {}", pattern))?;
+            let pattern: RecurrencePattern = pattern
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid pattern: {}. Error: {}", pattern, e))?;
             let start = parse_date(&start_date)?;
             let end = end_date.as_deref().map(parse_date).transpose()?;
 

@@ -30,17 +30,6 @@ impl WalletType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "asset" => Some(WalletType::Asset),
-            "liability" => Some(WalletType::Liability),
-            "income" => Some(WalletType::Income),
-            "expense" => Some(WalletType::Expense),
-            "equity" => Some(WalletType::Equity),
-            _ => None,
-        }
-    }
-
     /// Returns true if this wallet type represents an external entity
     /// (money entering or leaving the system)
     pub fn is_external(&self) -> bool {
@@ -54,6 +43,21 @@ impl WalletType {
 impl std::fmt::Display for WalletType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for WalletType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "asset" => Ok(WalletType::Asset),
+            "liability" => Ok(WalletType::Liability),
+            "income" => Ok(WalletType::Income),
+            "expense" => Ok(WalletType::Expense),
+            "equity" => Ok(WalletType::Equity),
+            _ => Err(format!("Invalid wallet type: {}", s)),
+        }
     }
 }
 
@@ -118,7 +122,7 @@ mod tests {
             WalletType::Equity,
         ] {
             let s = wt.as_str();
-            let parsed = WalletType::from_str(s).unwrap();
+            let parsed: WalletType = s.parse().unwrap();
             assert_eq!(wt, parsed);
         }
     }
