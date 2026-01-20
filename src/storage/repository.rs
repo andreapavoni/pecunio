@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::domain::{Cents, Transfer, TransferId, Wallet, WalletId, WalletType};
 
-use super::{MIGRATION_001_INITIAL, MIGRATION_002_BUDGETS, MIGRATION_003_SCHEDULED};
+use super::{
+    MIGRATION_001_INITIAL, MIGRATION_002_BUDGETS, MIGRATION_003_SCHEDULED, MIGRATION_004_REPORTING,
+};
 
 /// Statistics for ledger integrity verification.
 #[derive(Debug, Clone)]
@@ -53,6 +55,11 @@ impl Repository {
             .execute(&self.pool)
             .await
             .context("Failed to run migration 003")?;
+
+        sqlx::query(MIGRATION_004_REPORTING)
+            .execute(&self.pool)
+            .await
+            .context("Failed to run migration 004")?;
 
         Ok(())
     }
@@ -663,6 +670,85 @@ impl Repository {
         .context("Failed to sum transfers by category")?;
 
         Ok(row.get("total"))
+    }
+
+    /// Aggregate transfers by category within a date range.
+    /// Returns category name, count, total, and average for each category.
+    pub async fn aggregate_by_category(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+    ) -> Result<Vec<crate::application::CategoryAggregate>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                category,
+                COUNT(*) as count,
+                SUM(amount_cents) as total,
+                AVG(amount_cents) as average
+            FROM transfers
+            WHERE category IS NOT NULL
+              AND timestamp >= ?
+              AND timestamp < ?
+            GROUP BY category
+            ORDER BY total DESC
+            "#,
+        )
+        .bind(from_date.to_rfc3339())
+        .bind(to_date.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to aggregate transfers by category")?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(crate::application::CategoryAggregate {
+                category: row.get("category"),
+                count: row.get("count"),
+                total: row.get("total"),
+                average: row.get("average"),
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Aggregate transfers by wallet type within a date range.
+    /// Returns (inflow, outflow) for each wallet type.
+    pub async fn aggregate_by_wallet_type(
+        &self,
+        from_date: DateTime<Utc>,
+        to_date: DateTime<Utc>,
+    ) -> Result<std::collections::HashMap<crate::domain::WalletType, (Cents, Cents)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                w.wallet_type,
+                SUM(CASE WHEN t.to_wallet_id = w.id THEN t.amount_cents ELSE 0 END) as inflow,
+                SUM(CASE WHEN t.from_wallet_id = w.id THEN t.amount_cents ELSE 0 END) as outflow
+            FROM wallets w
+            LEFT JOIN transfers t ON (t.from_wallet_id = w.id OR t.to_wallet_id = w.id)
+            WHERE t.timestamp >= ? AND t.timestamp < ?
+            GROUP BY w.wallet_type
+            "#,
+        )
+        .bind(from_date.to_rfc3339())
+        .bind(to_date.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to aggregate transfers by wallet type")?;
+
+        let mut results = std::collections::HashMap::new();
+        for row in rows {
+            let wallet_type_str: String = row.get("wallet_type");
+            if let Some(wallet_type) = crate::domain::WalletType::from_str(&wallet_type_str) {
+                let inflow: Cents = row.get("inflow");
+                let outflow: Cents = row.get("outflow");
+                results.insert(wallet_type, (inflow, outflow));
+            }
+        }
+
+        Ok(results)
     }
 
     // ========================

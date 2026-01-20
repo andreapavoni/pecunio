@@ -5,7 +5,9 @@
 //! making it easy to build different interfaces (CLI, API, TUI) on top.
 
 pub mod error;
+pub mod reporting;
 pub mod service;
 
 pub use error::*;
+pub use reporting::*;
 pub use service::*;

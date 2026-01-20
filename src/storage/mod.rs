@@ -10,3 +10,6 @@ pub const MIGRATION_002_BUDGETS: &str = include_str!("migrations/002_budgets.sql
 
 /// SQL migration for scheduled transfers
 pub const MIGRATION_003_SCHEDULED: &str = include_str!("migrations/003_scheduled_transfers.sql");
+
+/// SQL migration for reporting indexes
+pub const MIGRATION_004_REPORTING: &str = include_str!("migrations/004_reporting_indexes.sql");

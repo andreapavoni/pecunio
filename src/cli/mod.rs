@@ -16,6 +16,10 @@ pub struct Cli {
     #[arg(short, long, default_value = "pecunio.db")]
     pub database: String,
 
+    /// Enable verbose output
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -295,7 +299,36 @@ pub enum ScheduledCommands {
 }
 
 impl Cli {
+    async fn auto_execute_scheduled(&self, service: &LedgerService) -> Result<()> {
+        let now = Utc::now();
+        let results = service.execute_due_scheduled_transfers(now).await?;
+
+        // Log only if verbose flag is set
+        if self.verbose && !results.is_empty() {
+            eprintln!(
+                "[Auto-exec] Executed {} scheduled transfer(s)",
+                results.len()
+            );
+            for result in results {
+                eprintln!(
+                    "  {} -> {}: {}",
+                    result.from_wallet_name,
+                    result.to_wallet_name,
+                    format_cents(result.transfer.amount_cents)
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn run(self) -> Result<()> {
+        // Auto-execute scheduled transfers before command dispatch (except for Init)
+        if !matches!(self.command, Commands::Init) {
+            if let Ok(service) = LedgerService::connect(&self.database).await {
+                let _ = self.auto_execute_scheduled(&service).await;
+            }
+        }
+
         match self.command {
             Commands::Init => {
                 LedgerService::init(&self.database).await?;
