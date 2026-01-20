@@ -1,191 +1,447 @@
 # Pecunio
 
-A local-first personal finance tool based on a transfer-based ledger with event sourcing.
+> A local-first personal finance ledger for the command line
 
-## Philosophy
+**Pecunio** is a simple, powerful, and private personal finance tool that runs entirely on your machine. No cloud accounts, no subscriptions, no data sharing—just you and your financial data.
 
-- **Transfer-based ledger**: Every financial event is an atomic transfer of money from one wallet to another. No classical double-entry accounting (debit/credit), just simple transfers.
-- **Event sourcing**: The ledger is append-only and serves as the single source of truth. Wallet balances are always derived, never stored.
-- **Local-first**: Your data stays on your machine in a SQLite database.
-- **CLI-first**: Designed for terminal users who prefer keyboard over mouse.
+Built on a **transfer-based ledger** model (money flows between wallets), Pecunio gives you complete control over tracking income, expenses, budgets, and scheduled transfers with automatic execution and comprehensive reporting.
 
-## Installation
+## Features
 
-```bash
-cargo build --release
-```
+### Core Functionality
+- **Transfer-based Ledger** - Track money flowing between wallets (accounts)
+- **5 Wallet Types** - Asset, Liability, Income, Expense, Equity
+- **Categories & Tags** - Organize transfers for budgeting and reporting
+- **Date Support** - Record historical transfers with custom timestamps
+- **Reversals** - Full and partial transfer reversals with audit trail
 
-The binary will be at `target/release/pecunio`.
+### Budgeting & Planning
+- **Budgets** - Set spending limits by category (weekly, monthly, yearly)
+- **Budget Tracking** - Real-time spending vs. limits with remaining balance
+- **Scheduled Transfers** - Recurring transfers (salary, rent, subscriptions)
+- **Auto-Execution** - Scheduled transfers execute automatically on every CLI invocation
+- **Forecasting** - Project future balances based on scheduled transfers
+
+### Reporting & Analytics
+- **Category Spending** - Breakdown with totals, averages, percentages
+- **Income vs Expense** - Net analysis with category breakdown
+- **Cash Flow** - Track inflow/outflow by period
+- **Net Worth** - Assets - Liabilities with detailed breakdown
+- **Period Comparison** - Compare current vs previous period
+
+### Data Portability
+- **Export** - Export transfers, balances, budgets to CSV or JSON
+- **Import** - Import transfers from CSV with validation
+- **Full Backup** - Complete database snapshot as JSON
+- **Bank Integration Ready** - Import from bank CSV exports
+
+### Technical
+- **SQLite Storage** - Fast, reliable, single-file database
+- **Local-First** - All data stays on your machine
+- **Data Integrity** - Built-in integrity checks and validation
+- **Well-Tested** - Comprehensive test suite (29+ integration tests)
+- **Rust** - Fast, safe, and efficient
 
 ## Quick Start
 
+### Installation
+
 ```bash
-# Initialize the database
+# Clone the repository
+git clone https://github.com/yourusername/pecunio.git
+cd pecunio
+
+# Build and install
+cargo install --path .
+
+# Or just build
+cargo build --release
+# Binary will be in target/release/pecunio
+```
+
+### Initialize Your Ledger
+
+```bash
+# Create a new database
 pecunio init
 
-# Create some wallets
-pecunio wallet create "Checking" --type asset
-pecunio wallet create "Savings" --type asset
-pecunio wallet create "Credit Card" --type liability
-pecunio wallet create "Salary" --type income
-pecunio wallet create "Groceries" --type expense
-pecunio wallet create "Utilities" --type expense
+# Or specify a custom location
+pecunio -d ~/finances/ledger.db init
+```
 
-# Record your salary
-pecunio transfer 5000 --from Salary --to Checking -d "January salary"
+## Usage Guide
 
-# Pay some bills
-pecunio transfer 150 --from Checking --to Utilities -d "Electric bill" -c utilities
-pecunio transfer 85.50 --from Checking --to Groceries -d "Weekly groceries" -c groceries
+### Basic Workflow
 
-# Use credit card
-pecunio transfer 45 --from "Credit Card" --to Groceries -d "Coffee and snacks" -c groceries
+1. **Create Wallets** (accounts)
+2. **Record Transfers** (money movements)
+3. **Check Balances**
+4. **Generate Reports**
 
-# Pay off credit card
-pecunio transfer 45 --from Checking --to "Credit Card" -d "CC payment"
+### 1. Creating Wallets
 
-# Move money to savings
-pecunio transfer 500 --from Checking --to Savings -d "Monthly savings"
+```bash
+# Create an asset wallet (checking account)
+pecunio wallet create Checking --type asset --currency USD
 
-# Check balances
+# Create income and expense wallets
+pecunio wallet create Salary --type income
+pecunio wallet create Groceries --type expense
+pecunio wallet create Rent --type expense
+
+# Create a liability (credit card)
+pecunio wallet create CreditCard --type liability
+
+# List all wallets
+pecunio wallet list
+```
+
+**Wallet Types:**
+- **Asset** - Bank accounts, cash, investments (things you own)
+- **Liability** - Credit cards, loans (debts you owe)
+- **Income** - Sources of money (salary, freelance, gifts)
+- **Expense** - Destinations for spending (groceries, rent, utilities)
+- **Equity** - Opening balances, adjustments
+
+### 2. Recording Transfers
+
+```bash
+# Receive salary
+pecunio transfer 5000 --from Salary --to Checking --category income
+
+# Pay rent
+pecunio transfer 1200 --from Checking --to Rent --category housing
+
+# Buy groceries
+pecunio transfer 150 --from Checking --to Groceries --category groceries --description "Weekly shopping"
+
+# Record a past transaction
+pecunio transfer 50 --from Checking --to Groceries --date 2024-01-15
+```
+
+### 3. Checking Balances
+
+```bash
+# Check all balances
 pecunio balance
+
+# Check specific wallet
+pecunio balance Checking
+
+# List recent transfers
+pecunio transfers --limit 10
+
+# Filter by category
+pecunio transfers --category groceries
+
+# Filter by date range
+pecunio transfers --from-date 2024-01-01 --to-date 2024-01-31
 ```
 
-## Concepts
-
-### Wallet Types
-
-| Type | Description | Examples |
-|------|-------------|----------|
-| `asset` | Money you own | Bank accounts, cash, investments |
-| `liability` | Money you owe | Credit cards, loans |
-| `income` | External money sources | Employers, interest, gifts |
-| `expense` | External money destinations | Merchants, bills, subscriptions |
-| `equity` | Opening balances, adjustments | Used for migration from other systems |
-
-### How Transfers Work
-
-Every transfer moves money from one wallet to another:
-
-```
-Transfer: Salary -> Checking, 5000
-  - Salary balance:   -5000 (you "owe" income to the system)
-  - Checking balance: +5000 (money in your account)
-```
-
-The sum of all wallet balances is always zero (closed system).
-
-### Credit Cards
-
-Credit cards are `liability` wallets. When you make a purchase:
+### 4. Budgeting
 
 ```bash
-# Purchase increases your debt (CC balance becomes negative)
-pecunio transfer 50 --from "Credit Card" --to "Amazon" -d "Books"
+# Create a monthly grocery budget
+pecunio budget create GroceryBudget --category groceries --amount 600 --period monthly
 
-# Payment decreases your debt
-pecunio transfer 50 --from Checking --to "Credit Card" -d "CC payment"
+# Check budget status
+pecunio budget status
+
+# List all budgets
+pecunio budget list
 ```
 
-### Categories
-
-Use categories for budgeting and reporting:
+### 5. Scheduled Transfers (Recurring)
 
 ```bash
-pecunio transfer 120 --from Checking --to "Whole Foods" -c groceries
-pecunio transfer 45 --from Checking --to "Shell" -c transportation
+# Create monthly salary (auto-executes on the 1st)
+pecunio scheduled create Salary \
+  --from Salary --to Checking \
+  --amount 5000 --pattern monthly \
+  --start-date 2024-01-01 \
+  --category income
+
+# Create monthly rent payment
+pecunio scheduled create Rent \
+  --from Checking --to Rent \
+  --amount 1200 --pattern monthly \
+  --start-date 2024-01-05 \
+  --category housing
+
+# List scheduled transfers
+pecunio scheduled list
+
+# Scheduled transfers execute automatically on every CLI command!
+# Use -v to see what was auto-executed
+pecunio -v balance
 ```
 
-## Commands
-
-### Database
+### 6. Forecasting
 
 ```bash
-pecunio init                  # Create database (default: pecunio.db)
-pecunio -d myfinances.db init # Use custom database file
+# Forecast 3 months ahead (based on scheduled transfers)
+pecunio forecast
+
+# Forecast 6 months
+pecunio forecast --months 6
 ```
 
-### Wallets
+### 7. Reporting
 
 ```bash
-pecunio wallet create "Name" --type asset     # Create wallet
-pecunio wallet create "Name" -t liability     # Short form
-pecunio wallet create "Name" -t asset -c USD  # Specify currency
-pecunio wallet list                           # List all wallets
-pecunio wallet list --all                     # Include archived
-pecunio wallet archive "Name"                 # Archive a wallet
+# Category spending report
+pecunio report spending
+
+# With custom date range
+pecunio report spending --from 2024-01-01 --to 2024-01-31
+
+# Income vs expense analysis
+pecunio report income-expense
+
+# Cash flow by month
+pecunio report cashflow --period monthly
+
+# Net worth summary
+pecunio report net-worth
+
+# Period comparison (this month vs last month)
+pecunio report compare --period monthly
+
+# Export as JSON
+pecunio report spending --format json
+
+# Export as CSV
+pecunio report spending --format csv
 ```
 
-### Transfers
+### 8. Import/Export
 
 ```bash
-pecunio transfer 100 --from Source --to Dest              # Basic transfer
-pecunio transfer 99.99 --from A --to B -d "Description"   # With description
-pecunio transfer 50 --from A --to B -c groceries          # With category
+# Export all transfers to CSV
+pecunio export transfers -o transfers.csv
+
+# Export balances
+pecunio export balances -o balances.csv
+
+# Full database backup
+pecunio export full -o backup.json
+
+# Import transfers from CSV
+pecunio import transfers -i bank_export.csv --create-wallets
+
+# Validate import without executing
+pecunio import transfers -i data.csv --validate
 ```
 
-### Balances
+## Example Use Cases
+
+### Use Case 1: Monthly Budget Tracking
 
 ```bash
-pecunio balance              # Show all wallet balances
-pecunio balance "Checking"   # Show specific wallet balance
+# Setup
+pecunio wallet create Checking --type asset
+pecunio wallet create Salary --type income
+pecunio wallet create Groceries --type expense
+pecunio wallet create Dining --type expense
+pecunio wallet create Entertainment --type expense
+
+# Create budgets
+pecunio budget create Food --category groceries --amount 600 --period monthly
+pecunio budget create DiningOut --category dining --amount 200 --period monthly
+pecunio budget create Fun --category entertainment --amount 150 --period monthly
+
+# Record spending throughout the month
+pecunio transfer 150 --from Checking --to Groceries --category groceries
+pecunio transfer 45 --from Checking --to Dining --category dining
+pecunio transfer 30 --from Checking --to Entertainment --category entertainment
+
+# Check budget status anytime
+pecunio budget status
 ```
 
-### Transaction History
+### Use Case 2: Salary & Bills Automation
 
 ```bash
-pecunio transfers                    # List recent transfers (default: 20)
-pecunio transfers --limit 50         # Show more
-pecunio transfers --wallet Checking  # Filter by wallet
+# Setup recurring transfers (execute automatically!)
+pecunio scheduled create MonthlySalary \
+  --from Salary --to Checking \
+  --amount 5000 --pattern monthly \
+  --start-date 2024-01-01
+
+pecunio scheduled create Rent \
+  --from Checking --to Rent \
+  --amount 1200 --pattern monthly \
+  --start-date 2024-01-05
+
+pecunio scheduled create Internet \
+  --from Checking --to Utilities \
+  --amount 60 --pattern monthly \
+  --start-date 2024-01-10
+
+# They'll execute automatically when due
+# Check what's scheduled
+pecunio scheduled list
+
+# Forecast your balance
+pecunio forecast --months 6
 ```
 
-## Data Model
+### Use Case 3: Credit Card Tracking
 
-### Wallets Table
+```bash
+# Setup
+pecunio wallet create Checking --type asset
+pecunio wallet create CreditCard --type liability
 
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| name | TEXT | Unique wallet name |
-| wallet_type | TEXT | asset, liability, income, expense, equity |
-| currency | TEXT | ISO 4217 code (default: EUR) |
-| allow_negative | BOOL | Whether balance can go negative |
-| description | TEXT | Optional description |
-| created_at | TEXT | ISO 8601 timestamp |
-| archived_at | TEXT | Soft delete timestamp |
+# Borrow from credit card (increases debt)
+pecunio transfer 500 --from CreditCard --to Checking
 
-### Transfers Table
+# Pay credit card bill (reduces debt)
+pecunio transfer 500 --from Checking --to CreditCard
 
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| sequence | INT | Monotonic ordering |
-| from_wallet_id | UUID | Source wallet |
-| to_wallet_id | UUID | Destination wallet |
-| amount_cents | INT | Amount in cents (always positive) |
-| timestamp | TEXT | When transaction occurred |
-| recorded_at | TEXT | When we recorded it |
-| description | TEXT | Human-readable description |
-| category | TEXT | For budgeting/reporting |
-| tags | JSON | Additional metadata |
-| reverses | UUID | Link to reversed transfer |
-| external_ref | TEXT | Bank transaction ID, etc. |
+# Check net worth (assets - liabilities)
+pecunio report net-worth
+```
 
-## Design Principles
+### Use Case 4: Expense Analysis
 
-1. **Money is stored as integer cents** - No floating point precision issues
-2. **Balances are always computed** - Never stored, always derived from transfers
-3. **Transfers are immutable** - Corrections via reversals, never edits
-4. **Append-only ledger** - Full audit trail, supports replay from genesis
+```bash
+# After recording transactions for a month, analyze spending
+pecunio report spending --from 2024-01-01 --to 2024-01-31
 
-## Roadmap
+# Compare this month vs last month
+pecunio report compare --period monthly
 
-- [x] Phase 1: Minimal viable ledger (transfers, balances, persistence)
-- [ ] Phase 2: Wallet management, efficient SQL-based balance queries
-- [ ] Phase 3: CLI ergonomics, budget tracking via categories
-- [ ] Phase 4: Scheduled/recurring transfers, forecasting
-- [ ] Phase 5: Reporting, integrity checks, import/export
+# See cash flow over time
+pecunio report cashflow --period monthly
+
+# Export for spreadsheet analysis
+pecunio export transfers -o january.csv
+```
+
+### Use Case 5: Bank Import & Reconciliation
+
+```bash
+# Export your bank transactions as CSV
+# Import into Pecunio
+pecunio import transfers -i bank_export.csv \
+  --create-wallets \
+  --skip-duplicates
+
+# Verify imported data
+pecunio transfers --limit 50
+
+# Check integrity
+pecunio check
+```
+
+## Command Reference
+
+### Global Flags
+- `-d, --database <PATH>` - Database file path (default: pecunio.db)
+- `-v, --verbose` - Enable verbose output (shows auto-executed transfers)
+
+### Commands
+
+**Initialization:**
+- `pecunio init` - Initialize a new database
+
+**Wallet Management:**
+- `pecunio wallet create <NAME> --type <TYPE>` - Create wallet
+- `pecunio wallet list` - List all wallets
+- `pecunio wallet show <NAME>` - Show wallet details
+- `pecunio wallet archive <NAME>` - Archive wallet
+
+**Transfers:**
+- `pecunio transfer <AMOUNT> --from <WALLET> --to <WALLET>` - Record transfer
+- `pecunio transfers` - List transfers
+- `pecunio show <ID>` - Show transfer details
+- `pecunio reverse <ID>` - Reverse a transfer
+- `pecunio balance [WALLET]` - Show balance(s)
+
+**Budgets:**
+- `pecunio budget create <NAME> --category <CAT> --amount <AMT> --period <PERIOD>`
+- `pecunio budget list` - List budgets
+- `pecunio budget status` - Show budget status
+- `pecunio budget delete <NAME>` - Delete budget
+
+**Scheduled Transfers:**
+- `pecunio scheduled create <NAME> --from <WALLET> --to <WALLET> --amount <AMT> --pattern <PATTERN> --start-date <DATE>`
+- `pecunio scheduled list` - List scheduled transfers
+- `pecunio scheduled show <NAME>` - Show details
+- `pecunio scheduled pause/resume <NAME>` - Pause/resume
+- `pecunio scheduled delete <NAME>` - Delete
+- `pecunio scheduled execute` - Manually execute due transfers
+
+**Forecasting:**
+- `pecunio forecast [--months N]` - Project future balances
+
+**Reporting:**
+- `pecunio report spending` - Category spending breakdown
+- `pecunio report income-expense` - Income vs expense analysis
+- `pecunio report cashflow` - Cash flow by period
+- `pecunio report net-worth` - Net worth summary
+- `pecunio report compare` - Period comparison
+
+**Import/Export:**
+- `pecunio export <TYPE> -o <FILE>` - Export data (types: transfers, balances, budgets, scheduled, full)
+- `pecunio import <TYPE> -i <FILE>` - Import data (types: transfers, full)
+
+**Utility:**
+- `pecunio check` - Verify ledger integrity
+
+## Development
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test suite
+cargo test --test phase5_reporting_test
+
+# Run with output
+cargo test -- --nocapture
+```
+
+### Building
+
+```bash
+# Debug build
+cargo build
+
+# Release build (optimized)
+cargo build --release
+
+# Run without installing
+cargo run -- balance
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-MIT
+MIT License - See LICENSE file for details
+
+## Roadmap
+
+**Possible future enhancements:**
+- Multi-currency support with exchange rates
+- Advanced forecasting with trend analysis
+- Bank API integrations (Plaid, Teller)
+- TUI (Terminal UI) interface
+- Web UI with local-first sync
+- Mobile apps
+
+## Support
+
+- **Bug Reports:** Open an issue on GitHub
+- **Feature Requests:** Open an issue with the "enhancement" label
+- **Documentation:** Check the help text: `pecunio --help`
+
+---
+
+**built with ❤️** by Andrea _pavonz_ Pavoni.
