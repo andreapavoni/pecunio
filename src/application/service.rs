@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::domain::{
-    build_integrity_report, Budget, Cents, IntegrityReport, PeriodType, Transfer, TransferId,
-    Wallet, WalletId, WalletType,
+    build_integrity_report, Budget, Cents, IntegrityReport, PeriodType, RecurrencePattern,
+    ScheduleStatus, ScheduledTransfer, Transfer, TransferId, Wallet, WalletId, WalletType,
 };
 use crate::storage::Repository;
 
@@ -502,5 +502,257 @@ impl LedgerService {
         }
 
         Ok(statuses)
+    }
+
+    // ========================
+    // Scheduled Transfer operations
+    // ========================
+
+    /// Create a new scheduled transfer.
+    pub async fn create_scheduled_transfer(
+        &self,
+        name: String,
+        from_wallet_name: &str,
+        to_wallet_name: &str,
+        amount_cents: Cents,
+        pattern: RecurrencePattern,
+        start_date: DateTime<Utc>,
+        end_date: Option<DateTime<Utc>>,
+        description: Option<String>,
+        category: Option<String>,
+    ) -> Result<ScheduledTransfer, AppError> {
+        // Check if scheduled transfer already exists
+        if self
+            .repo
+            .get_scheduled_transfer_by_name(&name)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::ScheduledTransferAlreadyExists(name));
+        }
+
+        // Validate amount
+        if amount_cents <= 0 {
+            return Err(AppError::InvalidAmount(
+                "Amount must be positive".to_string(),
+            ));
+        }
+
+        // Get wallets
+        let from_wallet = self.get_wallet(from_wallet_name).await?;
+        let to_wallet = self.get_wallet(to_wallet_name).await?;
+
+        // Check if archived
+        if from_wallet.is_archived() {
+            return Err(AppError::WalletArchived(from_wallet_name.to_string()));
+        }
+        if to_wallet.is_archived() {
+            return Err(AppError::WalletArchived(to_wallet_name.to_string()));
+        }
+
+        // Validate currencies match
+        if from_wallet.currency != to_wallet.currency {
+            return Err(AppError::CurrencyMismatch {
+                from_currency: from_wallet.currency.clone(),
+                to_currency: to_wallet.currency.clone(),
+            });
+        }
+
+        // Create scheduled transfer
+        let mut scheduled = ScheduledTransfer::new(
+            name,
+            from_wallet.id,
+            to_wallet.id,
+            amount_cents,
+            pattern,
+            start_date,
+        );
+
+        if let Some(end) = end_date {
+            scheduled = scheduled.with_end_date(end);
+        }
+        if let Some(desc) = description {
+            scheduled = scheduled.with_description(desc);
+        }
+        if let Some(cat) = category {
+            scheduled = scheduled.with_category(cat);
+        }
+
+        self.repo.save_scheduled_transfer(&scheduled).await?;
+        Ok(scheduled)
+    }
+
+    /// Get a scheduled transfer by name.
+    pub async fn get_scheduled_transfer(&self, name: &str) -> Result<ScheduledTransfer, AppError> {
+        self.repo
+            .get_scheduled_transfer_by_name(name)
+            .await?
+            .ok_or_else(|| AppError::ScheduledTransferNotFound(name.to_string()))
+    }
+
+    /// List all scheduled transfers.
+    pub async fn list_scheduled_transfers(
+        &self,
+        include_inactive: bool,
+    ) -> Result<Vec<ScheduledTransfer>, AppError> {
+        Ok(self.repo.list_scheduled_transfers(include_inactive).await?)
+    }
+
+    /// Pause a scheduled transfer.
+    pub async fn pause_scheduled_transfer(
+        &self,
+        name: &str,
+    ) -> Result<ScheduledTransfer, AppError> {
+        let scheduled = self.get_scheduled_transfer(name).await?;
+
+        self.repo
+            .update_scheduled_transfer_status(scheduled.id, ScheduleStatus::Paused)
+            .await?;
+
+        // Return updated instance
+        let mut updated = scheduled;
+        updated.status = ScheduleStatus::Paused;
+        Ok(updated)
+    }
+
+    /// Resume a scheduled transfer.
+    pub async fn resume_scheduled_transfer(
+        &self,
+        name: &str,
+    ) -> Result<ScheduledTransfer, AppError> {
+        let scheduled = self.get_scheduled_transfer(name).await?;
+
+        self.repo
+            .update_scheduled_transfer_status(scheduled.id, ScheduleStatus::Active)
+            .await?;
+
+        // Return updated instance
+        let mut updated = scheduled;
+        updated.status = ScheduleStatus::Active;
+        Ok(updated)
+    }
+
+    /// Delete a scheduled transfer.
+    pub async fn delete_scheduled_transfer(
+        &self,
+        name: &str,
+    ) -> Result<ScheduledTransfer, AppError> {
+        let scheduled = self.get_scheduled_transfer(name).await?;
+        self.repo.delete_scheduled_transfer(scheduled.id).await?;
+        Ok(scheduled)
+    }
+
+    /// Execute a specific scheduled transfer once.
+    pub async fn execute_scheduled_transfer(
+        &self,
+        name: &str,
+        execution_date: Option<DateTime<Utc>>,
+        force: bool,
+    ) -> Result<TransferResult, AppError> {
+        let scheduled = self.get_scheduled_transfer(name).await?;
+
+        let now = Utc::now();
+
+        // Check if completed
+        if scheduled.status == ScheduleStatus::Completed {
+            return Err(AppError::ScheduleCompleted(name.to_string()));
+        }
+
+        // Check if paused (can still force execute)
+        if scheduled.status == ScheduleStatus::Paused && !force {
+            return Err(AppError::ScheduleNotDue {
+                name: name.to_string(),
+                next_due: scheduled.next_execution_date(now).unwrap_or(now),
+            });
+        }
+
+        // Determine execution date
+        let exec_date = if let Some(date) = execution_date {
+            date
+        } else if force {
+            now
+        } else {
+            // Check if due
+            if !scheduled.is_due(now) {
+                return Err(AppError::ScheduleNotDue {
+                    name: name.to_string(),
+                    next_due: scheduled.next_execution_date(now).unwrap_or(now),
+                });
+            }
+            scheduled.next_execution_date(now).unwrap_or(now)
+        };
+
+        // Get wallet names for the transfer
+        let from_wallet =
+            self.repo
+                .get_wallet(scheduled.from_wallet)
+                .await?
+                .ok_or(AppError::WalletNotFound(format!(
+                    "Wallet ID: {}",
+                    scheduled.from_wallet
+                )))?;
+        let to_wallet =
+            self.repo
+                .get_wallet(scheduled.to_wallet)
+                .await?
+                .ok_or(AppError::WalletNotFound(format!(
+                    "Wallet ID: {}",
+                    scheduled.to_wallet
+                )))?;
+
+        // Create the actual transfer
+        let result = self
+            .record_transfer(
+                &from_wallet.name,
+                &to_wallet.name,
+                scheduled.amount_cents,
+                exec_date,
+                scheduled.description.clone(),
+                scheduled.category.clone(),
+                force, // Use force flag from scheduled execution
+            )
+            .await?;
+
+        // Update last_executed_at
+        self.repo
+            .update_last_executed(scheduled.id, exec_date)
+            .await?;
+
+        // Check if we've reached the end date and mark as completed
+        if let Some(end_date) = scheduled.end_date {
+            if exec_date >= end_date {
+                self.repo
+                    .update_scheduled_transfer_status(scheduled.id, ScheduleStatus::Completed)
+                    .await?;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Execute all due scheduled transfers up to the given date.
+    pub async fn execute_due_scheduled_transfers(
+        &self,
+        up_to: DateTime<Utc>,
+    ) -> Result<Vec<TransferResult>, AppError> {
+        let scheduled_transfers = self.list_scheduled_transfers(false).await?;
+        let mut results = Vec::new();
+
+        for scheduled in scheduled_transfers {
+            if scheduled.status != ScheduleStatus::Active {
+                continue;
+            }
+
+            let pending = scheduled.pending_executions(up_to);
+
+            for exec_date in pending {
+                let result = self
+                    .execute_scheduled_transfer(&scheduled.name, Some(exec_date), false)
+                    .await?;
+                results.push(result);
+            }
+        }
+
+        Ok(results)
     }
 }

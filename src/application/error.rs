@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::domain::{Cents, WalletId};
@@ -39,6 +40,24 @@ pub enum AppError {
         already_reversed: Cents,
         requested: Cents,
     },
+
+    #[error("Scheduled transfer not found: {0}")]
+    ScheduledTransferNotFound(String),
+
+    #[error("Scheduled transfer already exists: {0}")]
+    ScheduledTransferAlreadyExists(String),
+
+    #[error("Invalid recurrence pattern: {0}")]
+    InvalidRecurrencePattern(String),
+
+    #[error("Schedule '{name}' is not due yet (next execution: {next_due})")]
+    ScheduleNotDue {
+        name: String,
+        next_due: DateTime<Utc>,
+    },
+
+    #[error("Schedule '{0}' has completed (end date reached)")]
+    ScheduleCompleted(String),
 
     #[error("Database error: {0}")]
     Database(#[from] anyhow::Error),

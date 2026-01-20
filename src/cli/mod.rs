@@ -111,6 +111,21 @@ pub enum Commands {
     /// Budget management commands
     #[command(subcommand)]
     Budget(BudgetCommands),
+
+    /// Scheduled transfer management commands
+    #[command(subcommand)]
+    Scheduled(ScheduledCommands),
+
+    /// Forecast future balances based on scheduled transfers
+    Forecast {
+        /// Number of months to forecast
+        #[arg(short, long, default_value = "3")]
+        months: usize,
+
+        /// Filter by specific wallet (omit for all wallets)
+        #[arg(long)]
+        wallet: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -183,6 +198,99 @@ pub enum BudgetCommands {
     Delete {
         /// Budget name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScheduledCommands {
+    /// Create a new scheduled transfer
+    Create {
+        /// Scheduled transfer name (must be unique)
+        name: String,
+
+        /// Source wallet name
+        #[arg(long)]
+        from: String,
+
+        /// Destination wallet name
+        #[arg(long)]
+        to: String,
+
+        /// Amount to transfer (e.g., "50.00" or "50")
+        #[arg(short, long)]
+        amount: String,
+
+        /// Recurrence pattern: daily, weekly, monthly, yearly
+        #[arg(short, long)]
+        pattern: String,
+
+        /// Start date (ISO 8601 format: YYYY-MM-DD)
+        #[arg(long)]
+        start_date: String,
+
+        /// Optional end date (ISO 8601 format: YYYY-MM-DD)
+        #[arg(long)]
+        end_date: Option<String>,
+
+        /// Description of the transfer
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Category for budgeting
+        #[arg(short, long)]
+        category: Option<String>,
+    },
+
+    /// List all scheduled transfers
+    List {
+        /// Include paused and completed schedules
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Show detailed information about a scheduled transfer
+    Show {
+        /// Scheduled transfer name
+        name: String,
+    },
+
+    /// Pause a scheduled transfer
+    Pause {
+        /// Scheduled transfer name
+        name: String,
+    },
+
+    /// Resume a paused scheduled transfer
+    Resume {
+        /// Scheduled transfer name
+        name: String,
+    },
+
+    /// Delete a scheduled transfer
+    Delete {
+        /// Scheduled transfer name
+        name: String,
+    },
+
+    /// Execute all due scheduled transfers
+    Execute {
+        /// Preview without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Execute a specific scheduled transfer
+    Run {
+        /// Scheduled transfer name
+        name: String,
+
+        /// Specific date to execute (ISO 8601 format: YYYY-MM-DD, defaults to next due date)
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Force execution even if not due
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -309,6 +417,16 @@ impl Cli {
             Commands::Budget(budget_cmd) => {
                 let service = LedgerService::connect(&self.database).await?;
                 run_budget_command(&service, budget_cmd).await?;
+            }
+
+            Commands::Scheduled(scheduled_cmd) => {
+                let service = LedgerService::connect(&self.database).await?;
+                run_scheduled_command(&service, scheduled_cmd).await?;
+            }
+
+            Commands::Forecast { months, wallet } => {
+                let service = LedgerService::connect(&self.database).await?;
+                run_forecast_command(&service, months, wallet.as_deref()).await?;
             }
         }
 
@@ -720,5 +838,184 @@ async fn run_budget_command(service: &LedgerService, cmd: BudgetCommands) -> Res
         }
     }
 
+    Ok(())
+}
+
+async fn run_scheduled_command(service: &LedgerService, command: ScheduledCommands) -> Result<()> {
+    use crate::domain::RecurrencePattern;
+
+    match command {
+        ScheduledCommands::Create {
+            name,
+            from,
+            to,
+            amount,
+            pattern,
+            start_date,
+            end_date,
+            description,
+            category,
+        } => {
+            let amount_cents = parse_cents(&amount)?;
+            let pattern = RecurrencePattern::from_str(&pattern)
+                .ok_or_else(|| anyhow::anyhow!("Invalid pattern: {}", pattern))?;
+            let start = parse_date(&start_date)?;
+            let end = end_date.as_deref().map(parse_date).transpose()?;
+
+            let scheduled = service
+                .create_scheduled_transfer(
+                    name.clone(),
+                    &from,
+                    &to,
+                    amount_cents,
+                    pattern,
+                    start,
+                    end,
+                    description,
+                    category,
+                )
+                .await?;
+
+            println!("Created scheduled transfer: {}", scheduled.name);
+            println!("  From: {}", from);
+            println!("  To: {}", to);
+            println!("  Amount: {}", format_cents(scheduled.amount_cents));
+            println!("  Pattern: {}", scheduled.pattern);
+            println!("  Start: {}", scheduled.start_date.format("%Y-%m-%d"));
+            if let Some(end_date) = scheduled.end_date {
+                println!("  End: {}", end_date.format("%Y-%m-%d"));
+            }
+        }
+
+        ScheduledCommands::List { all } => {
+            let scheduled = service.list_scheduled_transfers(all).await?;
+            if scheduled.is_empty() {
+                println!("No scheduled transfers found.");
+            } else {
+                println!(
+                    "{:<20} {:<15} {:<15} {:>12} {:<10} {:<12}",
+                    "NAME", "FROM", "TO", "AMOUNT", "PATTERN", "STATUS"
+                );
+                println!("{}", "-".repeat(90));
+                for st in scheduled {
+                    // Get wallet names - we'll need to look them up
+                    // For now, just show the first part of IDs
+                    println!(
+                        "{:<20} {:<15} {:<15} {:>12} {:<10} {:<12}",
+                        truncate(&st.name, 20),
+                        format!("{:.8}", st.from_wallet),
+                        format!("{:.8}", st.to_wallet),
+                        format_cents(st.amount_cents),
+                        st.pattern,
+                        st.status,
+                    );
+                }
+            }
+        }
+
+        ScheduledCommands::Show { name } => {
+            let st = service.get_scheduled_transfer(&name).await?;
+            let now = Utc::now();
+
+            println!("Scheduled Transfer: {}", st.name);
+            println!("  ID: {}", st.id);
+            println!("  Status: {}", st.status);
+            println!("  Pattern: {}", st.pattern);
+            println!("  Amount: {}", format_cents(st.amount_cents));
+            println!("  Start Date: {}", st.start_date.format("%Y-%m-%d"));
+            if let Some(end_date) = st.end_date {
+                println!("  End Date: {}", end_date.format("%Y-%m-%d"));
+            }
+            if let Some(last_exec) = st.last_executed_at {
+                println!("  Last Executed: {}", last_exec.format("%Y-%m-%d"));
+            }
+            if let Some(next) = st.next_execution_date(now) {
+                println!("  Next Due: {}", next.format("%Y-%m-%d"));
+            }
+            if let Some(desc) = &st.description {
+                println!("  Description: {}", desc);
+            }
+            if let Some(cat) = &st.category {
+                println!("  Category: {}", cat);
+            }
+        }
+
+        ScheduledCommands::Pause { name } => {
+            service.pause_scheduled_transfer(&name).await?;
+            println!("Paused scheduled transfer: {}", name);
+        }
+
+        ScheduledCommands::Resume { name } => {
+            service.resume_scheduled_transfer(&name).await?;
+            println!("Resumed scheduled transfer: {}", name);
+        }
+
+        ScheduledCommands::Delete { name } => {
+            service.delete_scheduled_transfer(&name).await?;
+            println!("Deleted scheduled transfer: {}", name);
+        }
+
+        ScheduledCommands::Execute { dry_run } => {
+            let now = Utc::now();
+            if dry_run {
+                println!("DRY RUN - No transfers will be executed");
+                let scheduled = service.list_scheduled_transfers(false).await?;
+                for st in scheduled {
+                    let pending = st.pending_executions(now);
+                    if !pending.is_empty() {
+                        println!("\n{}: {} pending execution(s)", st.name, pending.len());
+                        for date in pending {
+                            println!("  - {}", date.format("%Y-%m-%d"));
+                        }
+                    }
+                }
+            } else {
+                let results = service.execute_due_scheduled_transfers(now).await?;
+                if results.is_empty() {
+                    println!("No scheduled transfers due for execution.");
+                } else {
+                    println!("Executed {} scheduled transfer(s):", results.len());
+                    for result in results {
+                        println!(
+                            "  {} -> {}: {}",
+                            result.from_wallet_name,
+                            result.to_wallet_name,
+                            format_cents(result.transfer.amount_cents)
+                        );
+                    }
+                }
+            }
+        }
+
+        ScheduledCommands::Run { name, date, force } => {
+            let exec_date = date.as_deref().map(parse_date).transpose()?;
+            let result = service
+                .execute_scheduled_transfer(&name, exec_date, force)
+                .await?;
+
+            println!("Executed scheduled transfer: {}", name);
+            println!(
+                "  {} -> {}: {}",
+                result.from_wallet_name,
+                result.to_wallet_name,
+                format_cents(result.transfer.amount_cents)
+            );
+            println!("  Transfer ID: {}", result.transfer.id);
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_forecast_command(
+    _service: &LedgerService,
+    months: usize,
+    wallet_filter: Option<&str>,
+) -> Result<()> {
+    println!("Forecast feature coming soon!");
+    println!("  Months: {}", months);
+    if let Some(wallet) = wallet_filter {
+        println!("  Wallet: {}", wallet);
+    }
     Ok(())
 }

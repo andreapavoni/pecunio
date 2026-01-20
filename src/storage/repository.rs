@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::domain::{Cents, Transfer, TransferId, Wallet, WalletId, WalletType};
 
-use super::{MIGRATION_001_INITIAL, MIGRATION_002_BUDGETS};
+use super::{MIGRATION_001_INITIAL, MIGRATION_002_BUDGETS, MIGRATION_003_SCHEDULED};
 
 /// Statistics for ledger integrity verification.
 #[derive(Debug, Clone)]
@@ -48,6 +48,11 @@ impl Repository {
             .execute(&self.pool)
             .await
             .context("Failed to run migration 002")?;
+
+        sqlx::query(MIGRATION_003_SCHEDULED)
+            .execute(&self.pool)
+            .await
+            .context("Failed to run migration 003")?;
 
         Ok(())
     }
@@ -658,6 +663,194 @@ impl Repository {
         .context("Failed to sum transfers by category")?;
 
         Ok(row.get("total"))
+    }
+
+    // ========================
+    // Scheduled Transfer operations
+    // ========================
+
+    /// Save a new scheduled transfer to the database.
+    pub async fn save_scheduled_transfer(
+        &self,
+        st: &crate::domain::ScheduledTransfer,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scheduled_transfers (id, name, from_wallet_id, to_wallet_id, amount_cents, pattern, start_date, end_date, last_executed_at, description, category, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(st.id.to_string())
+        .bind(&st.name)
+        .bind(st.from_wallet.to_string())
+        .bind(st.to_wallet.to_string())
+        .bind(st.amount_cents)
+        .bind(st.pattern.as_str())
+        .bind(st.start_date.to_rfc3339())
+        .bind(st.end_date.map(|dt| dt.to_rfc3339()))
+        .bind(st.last_executed_at.map(|dt| dt.to_rfc3339()))
+        .bind(&st.description)
+        .bind(&st.category)
+        .bind(st.status.as_str())
+        .bind(st.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Failed to save scheduled transfer")?;
+        Ok(())
+    }
+
+    /// Get a scheduled transfer by ID.
+    pub async fn get_scheduled_transfer(
+        &self,
+        id: crate::domain::ScheduledTransferId,
+    ) -> Result<Option<crate::domain::ScheduledTransfer>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, from_wallet_id, to_wallet_id, amount_cents, pattern, start_date, end_date, last_executed_at, description, category, status, created_at
+            FROM scheduled_transfers
+            WHERE id = ?
+            "#,
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to fetch scheduled transfer")?;
+
+        match row {
+            Some(row) => Ok(Some(Self::row_to_scheduled_transfer(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Get a scheduled transfer by name.
+    pub async fn get_scheduled_transfer_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::domain::ScheduledTransfer>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, from_wallet_id, to_wallet_id, amount_cents, pattern, start_date, end_date, last_executed_at, description, category, status, created_at
+            FROM scheduled_transfers
+            WHERE name = ?
+            "#,
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to fetch scheduled transfer by name")?;
+
+        match row {
+            Some(row) => Ok(Some(Self::row_to_scheduled_transfer(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List all scheduled transfers.
+    pub async fn list_scheduled_transfers(
+        &self,
+        include_inactive: bool,
+    ) -> Result<Vec<crate::domain::ScheduledTransfer>> {
+        let query = if include_inactive {
+            "SELECT id, name, from_wallet_id, to_wallet_id, amount_cents, pattern, start_date, end_date, last_executed_at, description, category, status, created_at FROM scheduled_transfers ORDER BY name"
+        } else {
+            "SELECT id, name, from_wallet_id, to_wallet_id, amount_cents, pattern, start_date, end_date, last_executed_at, description, category, status, created_at FROM scheduled_transfers WHERE status = 'active' ORDER BY name"
+        };
+
+        let rows = sqlx::query(query)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to list scheduled transfers")?;
+
+        rows.iter().map(Self::row_to_scheduled_transfer).collect()
+    }
+
+    /// Update the status of a scheduled transfer.
+    pub async fn update_scheduled_transfer_status(
+        &self,
+        id: crate::domain::ScheduledTransferId,
+        status: crate::domain::ScheduleStatus,
+    ) -> Result<()> {
+        sqlx::query("UPDATE scheduled_transfers SET status = ? WHERE id = ?")
+            .bind(status.as_str())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("Failed to update scheduled transfer status")?;
+        Ok(())
+    }
+
+    /// Update the last executed timestamp of a scheduled transfer.
+    pub async fn update_last_executed(
+        &self,
+        id: crate::domain::ScheduledTransferId,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE scheduled_transfers SET last_executed_at = ? WHERE id = ?")
+            .bind(timestamp.to_rfc3339())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("Failed to update last_executed_at")?;
+        Ok(())
+    }
+
+    /// Delete a scheduled transfer.
+    pub async fn delete_scheduled_transfer(
+        &self,
+        id: crate::domain::ScheduledTransferId,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM scheduled_transfers WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete scheduled transfer")?;
+        Ok(())
+    }
+
+    fn row_to_scheduled_transfer(
+        row: &sqlx::sqlite::SqliteRow,
+    ) -> Result<crate::domain::ScheduledTransfer> {
+        use crate::domain::{RecurrencePattern, ScheduleStatus};
+
+        let id_str: String = row.get("id");
+        let from_wallet_str: String = row.get("from_wallet_id");
+        let to_wallet_str: String = row.get("to_wallet_id");
+        let pattern_str: String = row.get("pattern");
+        let start_date_str: String = row.get("start_date");
+        let end_date_str: Option<String> = row.get("end_date");
+        let last_executed_str: Option<String> = row.get("last_executed_at");
+        let status_str: String = row.get("status");
+        let created_at_str: String = row.get("created_at");
+
+        Ok(crate::domain::ScheduledTransfer {
+            id: Uuid::parse_str(&id_str).context("Invalid scheduled transfer ID")?,
+            name: row.get("name"),
+            from_wallet: Uuid::parse_str(&from_wallet_str).context("Invalid from_wallet ID")?,
+            to_wallet: Uuid::parse_str(&to_wallet_str).context("Invalid to_wallet ID")?,
+            amount_cents: row.get("amount_cents"),
+            pattern: RecurrencePattern::from_str(&pattern_str)
+                .ok_or_else(|| anyhow::anyhow!("Invalid recurrence pattern: {}", pattern_str))?,
+            start_date: DateTime::parse_from_rfc3339(&start_date_str)
+                .context("Invalid start_date")?
+                .with_timezone(&Utc),
+            end_date: end_date_str
+                .map(|s| DateTime::parse_from_rfc3339(&s))
+                .transpose()
+                .context("Invalid end_date")?
+                .map(|dt| dt.with_timezone(&Utc)),
+            last_executed_at: last_executed_str
+                .map(|s| DateTime::parse_from_rfc3339(&s))
+                .transpose()
+                .context("Invalid last_executed_at")?
+                .map(|dt| dt.with_timezone(&Utc)),
+            description: row.get("description"),
+            category: row.get("category"),
+            status: ScheduleStatus::from_str(&status_str)
+                .ok_or_else(|| anyhow::anyhow!("Invalid schedule status: {}", status_str))?,
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)
+                .context("Invalid created_at")?
+                .with_timezone(&Utc),
+        })
     }
 
     fn row_to_budget(row: &sqlx::sqlite::SqliteRow) -> Result<crate::domain::Budget> {
