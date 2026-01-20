@@ -76,7 +76,9 @@ impl Wallet {
             name,
             wallet_type,
             currency,
-            allow_negative: matches!(wallet_type, WalletType::Liability),
+            // Only Assets cannot go negative. All external wallets (Income, Expense, Equity)
+            // and Liabilities can have negative balances.
+            allow_negative: !matches!(wallet_type, WalletType::Asset),
             description: None,
             created_at: Utc::now(),
             archived_at: None,
@@ -131,6 +133,20 @@ mod tests {
     fn test_asset_disallows_negative_by_default() {
         let wallet = Wallet::new("Checking".into(), WalletType::Asset, "EUR".into());
         assert!(!wallet.allow_negative);
+    }
+
+    #[test]
+    fn test_external_wallets_allow_negative_by_default() {
+        // Income, Expense, and Equity wallets represent external entities
+        // and should allow negative balances
+        let income = Wallet::new("Salary".into(), WalletType::Income, "EUR".into());
+        assert!(income.allow_negative);
+
+        let expense = Wallet::new("Groceries".into(), WalletType::Expense, "EUR".into());
+        assert!(expense.allow_negative);
+
+        let equity = Wallet::new("Opening Balance".into(), WalletType::Equity, "EUR".into());
+        assert!(equity.allow_negative);
     }
 
     #[test]

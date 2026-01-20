@@ -1008,14 +1008,70 @@ async fn run_scheduled_command(service: &LedgerService, command: ScheduledComman
 }
 
 async fn run_forecast_command(
-    _service: &LedgerService,
+    service: &LedgerService,
     months: usize,
     wallet_filter: Option<&str>,
 ) -> Result<()> {
-    println!("Forecast feature coming soon!");
-    println!("  Months: {}", months);
-    if let Some(wallet) = wallet_filter {
-        println!("  Wallet: {}", wallet);
+    let forecast = service.forecast_balances(months).await?;
+
+    if forecast.snapshots.is_empty() {
+        println!("No forecast data available.");
+        return Ok(());
     }
+
+    println!(
+        "Forecast: {} to {}",
+        forecast.start_date.format("%Y-%m-%d"),
+        forecast.end_date.format("%Y-%m-%d")
+    );
+    println!();
+
+    // Get all wallet names from the first snapshot
+    let mut wallet_names: Vec<String> = forecast.snapshots[0]
+        .wallet_balances
+        .keys()
+        .cloned()
+        .collect();
+
+    // Filter by wallet if specified
+    if let Some(filter) = wallet_filter {
+        wallet_names.retain(|name| name == filter);
+        if wallet_names.is_empty() {
+            println!("No wallet found with name: {}", filter);
+            return Ok(());
+        }
+    }
+
+    wallet_names.sort();
+
+    // Print header
+    print!("{:<12}", "DATE");
+    for wallet in &wallet_names {
+        print!("{:>15}", truncate(wallet, 15));
+    }
+    println!("{:<40}", "  EVENT");
+    println!("{}", "-".repeat(80 + wallet_names.len() * 15));
+
+    // Print snapshots
+    for snapshot in &forecast.snapshots {
+        print!("{:<12}", snapshot.date.format("%Y-%m-%d"));
+
+        for wallet in &wallet_names {
+            let balance = snapshot.wallet_balances.get(wallet).copied().unwrap_or(0);
+            print!("{:>15}", format_cents(balance));
+        }
+
+        if let Some(event) = &snapshot.event {
+            print!(
+                "  {} ({} -> {})",
+                event.scheduled_name,
+                truncate(&event.from_wallet, 10),
+                truncate(&event.to_wallet, 10)
+            );
+        }
+
+        println!();
+    }
+
     Ok(())
 }

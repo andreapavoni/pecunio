@@ -73,6 +73,28 @@ pub struct BudgetStatus {
     pub period_end: DateTime<Utc>,
 }
 
+/// Forecast result showing projected balances
+pub struct ForecastResult {
+    pub start_date: DateTime<Utc>,
+    pub end_date: DateTime<Utc>,
+    pub snapshots: Vec<ForecastSnapshot>,
+}
+
+/// A snapshot of wallet balances at a specific point in time
+pub struct ForecastSnapshot {
+    pub date: DateTime<Utc>,
+    pub wallet_balances: HashMap<String, Cents>,
+    pub event: Option<ForecastEvent>,
+}
+
+/// Event that caused a balance change in the forecast
+pub struct ForecastEvent {
+    pub scheduled_name: String,
+    pub from_wallet: String,
+    pub to_wallet: String,
+    pub amount: Cents,
+}
+
 impl LedgerService {
     /// Create a new ledger service with the given repository.
     pub fn new(repo: Repository) -> Self {
@@ -754,5 +776,149 @@ impl LedgerService {
         }
 
         Ok(results)
+    }
+
+    /// Forecast future balances based on scheduled transfers.
+    pub async fn forecast_balances(&self, months: usize) -> Result<ForecastResult, AppError> {
+        use chrono::{Datelike, Duration};
+
+        let now = Utc::now();
+        let start_date = now;
+        let end_date = now + Duration::days((months * 30) as i64); // Approximate
+
+        // Get current balances for all wallets
+        let wallets = self.list_wallets(false).await?;
+        let current_balances = self.repo.compute_all_balances().await?;
+
+        // Initialize balance map with current balances
+        let mut balances: HashMap<String, Cents> = HashMap::new();
+        for wallet in &wallets {
+            let balance = current_balances.get(&wallet.id).copied().unwrap_or(0);
+            balances.insert(wallet.name.clone(), balance);
+        }
+
+        // Get all active scheduled transfers
+        let scheduled_transfers = self.list_scheduled_transfers(false).await?;
+
+        // Collect all execution events in the forecast period
+        let mut events: Vec<(DateTime<Utc>, &ScheduledTransfer)> = Vec::new();
+
+        for st in &scheduled_transfers {
+            if st.status != ScheduleStatus::Active {
+                continue;
+            }
+
+            // Get all pending executions within the forecast window
+            let pending = st.pending_executions(end_date);
+            for date in pending {
+                if date > now && date <= end_date {
+                    events.push((date, st));
+                }
+            }
+        }
+
+        // Sort events by date
+        events.sort_by_key(|(date, _)| *date);
+
+        // Create snapshots
+        let mut snapshots = Vec::new();
+
+        // Add initial snapshot (current state)
+        snapshots.push(ForecastSnapshot {
+            date: now,
+            wallet_balances: balances.clone(),
+            event: None,
+        });
+
+        // Process each event and create snapshot
+        for (date, st) in events {
+            // Get wallet names
+            let from_wallet =
+                self.repo
+                    .get_wallet(st.from_wallet)
+                    .await?
+                    .ok_or(AppError::WalletNotFound(format!(
+                        "Wallet ID: {}",
+                        st.from_wallet
+                    )))?;
+            let to_wallet =
+                self.repo
+                    .get_wallet(st.to_wallet)
+                    .await?
+                    .ok_or(AppError::WalletNotFound(format!(
+                        "Wallet ID: {}",
+                        st.to_wallet
+                    )))?;
+
+            // Update balances
+            *balances.entry(from_wallet.name.clone()).or_insert(0) -= st.amount_cents;
+            *balances.entry(to_wallet.name.clone()).or_insert(0) += st.amount_cents;
+
+            // Create snapshot with event
+            snapshots.push(ForecastSnapshot {
+                date,
+                wallet_balances: balances.clone(),
+                event: Some(ForecastEvent {
+                    scheduled_name: st.name.clone(),
+                    from_wallet: from_wallet.name.clone(),
+                    to_wallet: to_wallet.name.clone(),
+                    amount: st.amount_cents,
+                }),
+            });
+        }
+
+        // Add monthly snapshots if there are no events in that month
+        let mut current_month_date = now
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+
+        while current_month_date <= end_date {
+            let month_start = current_month_date;
+            let month_end = if current_month_date.month() == 12 {
+                current_month_date
+                    .date_naive()
+                    .with_year(current_month_date.year() + 1)
+                    .unwrap()
+                    .with_month(1)
+                    .unwrap()
+            } else {
+                current_month_date
+                    .date_naive()
+                    .with_month(current_month_date.month() + 1)
+                    .unwrap()
+            }
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+
+            // Check if we already have a snapshot for this month
+            let has_snapshot = snapshots
+                .iter()
+                .any(|s| s.date >= month_start && s.date < month_end);
+
+            if !has_snapshot && month_end > now {
+                // Add end-of-month snapshot
+                snapshots.push(ForecastSnapshot {
+                    date: month_end - Duration::days(1),
+                    wallet_balances: balances.clone(),
+                    event: None,
+                });
+            }
+
+            current_month_date = month_end;
+        }
+
+        // Sort snapshots by date
+        snapshots.sort_by_key(|s| s.date);
+
+        Ok(ForecastResult {
+            start_date,
+            end_date,
+            snapshots,
+        })
     }
 }
