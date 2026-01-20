@@ -1,7 +1,18 @@
 [package]
 name = "pecunio"
+description = "A local-first personal finance ledger for the command line."
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+authors = ["Andrea Pavoni <andrea.pavoni@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/andreapavoni/pecunio"
+keywords = ["money", "rust", "ledger", "personal-finance", "cli", "analytics"]
+rust-version = "1.85"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
 
 [dependencies]
 # Core
